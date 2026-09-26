@@ -9,6 +9,8 @@
                         в Crop зеркалится только видео, до наложения на фон
     3. Субтитры       — поверх уже обработанного видео (текст читается)
     4. Баннер         — поверх всего (баннер не зеркалится)
+    5. Концовка       — картинка из assets/outro на 3 сек в конце
+                        (без зеркала, субтитров и баннера)
     +  Фоновая музыка
 
 Всё выполняется одним проходом FFmpeg (одно перекодирование = без
@@ -42,6 +44,12 @@ from app.processing.media import (
     run_ffmpeg,
 )
 from app.processing.music import pick_music
+from app.processing.outro import (
+    OUTRO_DURATION,
+    find_outro_image,
+    outro_filters,
+    outro_input_arguments,
+)
 from app.processing.subtitle_formatter import format_srt
 from app.processing.subtitles import (
     NoSpeechError,
@@ -239,6 +247,26 @@ def process_video(
         filters += banner_chain
         current = "[bannered]"
 
+    # 5. Концовка — приклеивается после всех эффектов
+    outro_file = find_outro_image()
+    total_duration = duration
+
+    if outro_file is not None:
+        inputs += outro_input_arguments(outro_file)
+
+        filters += outro_filters(
+            video_label=current,
+            input_index=input_count,
+            video_width=width,
+            video_height=height,
+            video_duration=duration,
+            output_label="[with_outro]",
+        )
+        input_count += 1
+
+        current = "[with_outro]"
+        total_duration = duration + OUTRO_DURATION
+
     filters.append(f"{current}format=yuv420p[vout]")
 
     # ------------------------------------------
@@ -253,27 +281,36 @@ def process_video(
         music_index = input_count
         input_count += 1
 
-        fade_start = max(0.0, duration - 1.0)
+        # Музыка звучит и под концовкой, затухая к самому концу.
+        fade_start = max(0.0, total_duration - 1.0)
 
         filters.append(
             f"[{music_index}:a]"
             "aresample=48000,"
             f"volume={music_volume:.4f},"
-            f"atrim=duration={duration:.3f},"
+            f"atrim=duration={total_duration:.3f},"
             "asetpts=N/SR/TB,"
             f"afade=t=out:st={fade_start:.3f}:d=1"
             "[music]"
         )
 
         if source_has_audio:
+            # Оригинальный звук дополняется тишиной на время концовки.
             filters.append(
-                "[0:a]aresample=48000[orig];"
+                "[0:a]aresample=48000,"
+                f"apad=whole_dur={total_duration:.3f}[orig];"
                 "[orig][music]amix=inputs=2:duration=first:"
                 "dropout_transition=0:normalize=0[aout]"
             )
         else:
             filters.append("[music]anull[aout]")
 
+        audio_map = "[aout]"
+
+    elif source_has_audio and outro_file is not None:
+        filters.append(
+            f"[0:a]apad=whole_dur={total_duration:.3f}[aout]"
+        )
         audio_map = "[aout]"
 
     elif source_has_audio:
@@ -300,7 +337,7 @@ def process_video(
 
     arguments += [
         "-t",
-        f"{duration:.3f}",
+        f"{total_duration:.3f}",
         "-c:v",
         "libx264",
         "-preset",
@@ -327,6 +364,7 @@ def process_video(
     print(f"Зеркало:     {'да' if options.mirror else 'нет'}")
     print(f"Субтитры:    {'да' if ass_file else 'нет'}")
     print(f"Баннер:      {banner_file.name if banner_file else 'нет'}")
+    print(f"Концовка:    {outro_file.name if outro_file else 'нет'}")
     print(
         f"Музыка:      "
         f"{f'{music_file.name} ({music_volume * 100:.1f}%)' if music_file else 'нет'}"
@@ -354,7 +392,7 @@ def process_video(
         output_file = _compress_to_limit(
             input_file=output_file,
             output_file=work_dir / "result_compressed.mp4",
-            duration=duration,
+            duration=total_duration,
             limit_mb=limit_mb,
             has_audio_track=audio_map is not None,
         )
@@ -368,7 +406,7 @@ def process_video(
 
     return ProcessingResult(
         file=output_file,
-        duration=duration,
+        duration=total_duration,
         size_mb=file_size_mb(output_file),
         mode=options.mode,
         mirrored=options.mirror,

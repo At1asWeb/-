@@ -103,6 +103,7 @@ class Settings:
     banners_dir: Path
     backgrounds_dir: Path
     music_dir: Path
+    outro_dir: Path
     models_dir: Path
     work_dir: Path
     input_dir: Path
@@ -168,6 +169,8 @@ settings = Settings(
     banners_dir=BASE_DIR / "assets" / "banners",
     backgrounds_dir=BASE_DIR / "assets" / "backgrounds",
     music_dir=BASE_DIR / "assets" / "music",
+    # Картинка-концовка (3 сек в конце каждого видео)
+    outro_dir=BASE_DIR / "assets" / "outro",
     models_dir=BASE_DIR / "assets" / "models",
     work_dir=BASE_DIR / "work",
     input_dir=BASE_DIR / "work" / "input",

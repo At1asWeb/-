@@ -189,6 +189,7 @@ async def main():
         settings.banners_dir,
         settings.music_dir,
         settings.backgrounds_dir,
+        settings.outro_dir,
     ):
         directory.mkdir(parents=True, exist_ok=True)
 

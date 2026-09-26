@@ -27,6 +27,8 @@ work/output/*
 # Local assets
 assets/banners/*
 assets/music/*
+assets/outro/*
+!assets/outro/.gitkeep
 
 # IDE
 .vscode/
@@ -38,3 +40,5 @@ Thumbs.db
 
 # Logs
 *.log
+# Runtime stats (contains user IDs)
+data/stats.json

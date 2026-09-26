@@ -1,0 +1,40 @@
+# Environment
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# Database
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+
+# Temporary files
+work/input/*
+work/temp/*
+work/output/*
+
+# Keep directories
+!work/input/.gitkeep
+!work/temp/.gitkeep
+!work/output/.gitkeep
+
+# Local assets
+assets/banners/*
+assets/music/*
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Logs
+*.log

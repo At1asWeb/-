@@ -1,7 +1,8 @@
 """
 Сценарий обработки видео:
 
-ссылка → режим уникализации → субтитры → баннер → очередь → результат.
+ссылка → режим уникализации → зеркало → субтитры → баннер →
+картинка в конце (если она загружена) → очередь → результат.
 """
 
 import asyncio
@@ -19,12 +20,14 @@ from app.processing.downloader import DownloadError, download_video
 from app.processing.library import list_assets
 from app.processing.lock import is_processing, processing_slot, queue_size
 from app.processing.media import FFmpegError
+from app.processing.outro import OUTRO_DURATION, find_outro_image
 from app.processing.processor import MODES, ProcessingOptions, process_video
 from app.storage import record_processing
 from app.bot.keyboards.processing import (
     get_banners_keyboard,
     get_mirror_keyboard,
     get_modes_keyboard,
+    get_outro_keyboard,
     get_subtitles_keyboard,
 )
 
@@ -46,6 +49,7 @@ class VideoStates(StatesGroup):
     choosing_mirror = State()
     choosing_subtitles = State()
     choosing_banner = State()
+    choosing_outro = State()
 
 
 def extract_url(text: str | None) -> str | None:
@@ -207,7 +211,7 @@ async def subtitles_handler(callback: CallbackQuery, state: FSMContext):
 
 
 # ==========================================
-# ШАГ 5. БАННЕР → ЗАПУСК
+# ШАГ 5. БАННЕР
 # ==========================================
 
 async def banner_handler(callback: CallbackQuery, state: FSMContext):
@@ -243,6 +247,55 @@ async def banner_handler(callback: CallbackQuery, state: FSMContext):
             )
             return
 
+    await state.update_data(banner_name=banner_name)
+
+    # Шаг с концовкой показываем, только если картинка загружена.
+    if find_outro_image() is None:
+        await _start_job(callback, state, outro=False)
+        return
+
+    await state.set_state(VideoStates.choosing_outro)
+    await callback.answer()
+
+    await callback.message.edit_text(
+        f"Режим: {MODES[mode]}\n"
+        f"Зеркало: {'да' if data.get('mirror', True) else 'нет'}\n"
+        f"Субтитры: {'да' if data.get('subtitles') else 'нет'}\n"
+        f"Баннер: {banner_name or 'без рекламы'}\n\n"
+        f"🖼 Добавить картинку в конце видео ({OUTRO_DURATION:.0f} сек)?\n\n"
+        "Зеркало, субтитры и баннер на неё не накладываются.",
+        reply_markup=get_outro_keyboard(),
+    )
+
+
+# ==========================================
+# ШАГ 6. КАРТИНКА В КОНЦЕ → ЗАПУСК
+# ==========================================
+
+async def outro_handler(callback: CallbackQuery, state: FSMContext):
+    outro = callback.data.split(":", 1)[1] == "yes"
+    await _start_job(callback, state, outro=outro)
+
+
+async def _start_job(
+    callback: CallbackQuery,
+    state: FSMContext,
+    outro: bool,
+) -> None:
+    data = await state.get_data()
+
+    url = data.get("source_url")
+    mode = data.get("mode")
+    banner_name = data.get("banner_name")
+
+    if not url or mode not in MODES:
+        await state.clear()
+        await callback.answer()
+        await callback.message.edit_text(
+            "❌ Данные сессии потеряны. Отправьте ссылку заново."
+        )
+        return
+
     user_id = callback.from_user.id
 
     if user_id in _active_users:
@@ -254,6 +307,7 @@ async def banner_handler(callback: CallbackQuery, state: FSMContext):
         mirror=bool(data.get("mirror", True)),
         subtitles=bool(data.get("subtitles")),
         banner_name=banner_name,
+        outro=outro,
     )
 
     await state.clear()
@@ -263,7 +317,8 @@ async def banner_handler(callback: CallbackQuery, state: FSMContext):
         f"Режим: {MODES[mode]}\n"
         f"Зеркало: {'да' if options.mirror else 'нет'}\n"
         f"Субтитры: {'да' if options.subtitles else 'нет'}\n"
-        f"Баннер: {banner_name or 'без рекламы'}"
+        f"Баннер: {banner_name or 'без рекламы'}\n"
+        f"Картинка в конце: {'да' if outro else 'нет'}"
     )
 
     status = await callback.message.edit_text(f"{summary}\n\n🚀 Запускаю…")
@@ -360,6 +415,7 @@ async def run_job(
             f"Зеркало: {'да' if result.mirrored else 'нет'}",
             f"Субтитры: {'да' if result.subtitles_added else 'нет'}",
             f"Баннер: {'да' if result.banner_added else 'нет'}",
+            f"Картинка в конце: {'да' if result.outro_added else 'нет'}",
             f"Размер: {result.size_mb:.2f} MB",
         ]
 

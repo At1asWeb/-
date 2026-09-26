@@ -83,3 +83,21 @@ def get_banners_keyboard(banner_names: list[str]) -> InlineKeyboardMarkup:
     rows.append([CANCEL_BUTTON])
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_outro_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🖼 Да, добавить",
+                    callback_data="outro:yes",
+                ),
+                InlineKeyboardButton(
+                    text="❌ Без картинки",
+                    callback_data="outro:no",
+                ),
+            ],
+            [CANCEL_BUTTON],
+        ]
+    )

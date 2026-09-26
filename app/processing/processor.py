@@ -80,6 +80,7 @@ class ProcessingOptions:
     mirror: bool = True
     subtitles: bool = False
     banner_name: str | None = None
+    outro: bool = True
 
 
 @dataclass
@@ -91,6 +92,7 @@ class ProcessingResult:
     mirrored: bool
     subtitles_added: bool
     banner_added: bool
+    outro_added: bool
     music_name: str | None
     notes: list[str] = field(default_factory=list)
 
@@ -248,7 +250,7 @@ def process_video(
         current = "[bannered]"
 
     # 5. Концовка — приклеивается после всех эффектов
-    outro_file = find_outro_image()
+    outro_file = find_outro_image() if options.outro else None
     total_duration = duration
 
     if outro_file is not None:
@@ -412,6 +414,7 @@ def process_video(
         mirrored=options.mirror,
         subtitles_added=ass_file is not None,
         banner_added=banner_file is not None,
+        outro_added=outro_file is not None,
         music_name=music_file.name if music_file else None,
         notes=notes,
     )

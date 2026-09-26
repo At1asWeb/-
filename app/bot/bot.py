@@ -17,6 +17,7 @@ from app.bot.handlers.video import (
     cancel_job_callback,
     mirror_handler,
     mode_handler,
+    outro_handler,
     process_video_start,
     subtitles_handler,
     text_fallback_handler,
@@ -132,6 +133,11 @@ def create_dispatcher() -> Dispatcher:
         banner_handler,
         StateFilter(VideoStates.choosing_banner),
         F.data.startswith("banner:"),
+    )
+    dp.callback_query.register(
+        outro_handler,
+        StateFilter(VideoStates.choosing_outro),
+        F.data.startswith("outro:"),
     )
     dp.callback_query.register(cancel_job_callback, F.data == "job:cancel")
 

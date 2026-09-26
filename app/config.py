@@ -86,6 +86,7 @@ class Settings:
     temp_file_max_age_hours: int
     processing_timeout_seconds: int
     max_video_duration: int
+    max_batch_size: int
     max_input_size_mb: int
     max_output_size_mb: int
     telegram_upload_limit_mb: int
@@ -147,6 +148,8 @@ settings = Settings(
         1800,
     ),
     max_video_duration=get_int("MAX_VIDEO_DURATION", 300),
+    # Сколько ссылок можно отправить одним списком.
+    max_batch_size=get_int("MAX_BATCH_SIZE", 30),
     max_input_size_mb=get_int("MAX_INPUT_SIZE_MB", 200),
     max_output_size_mb=get_int("MAX_OUTPUT_SIZE_MB", 200),
     # Лимит Telegram Bot API на отправку файлов ботом (50 МБ).

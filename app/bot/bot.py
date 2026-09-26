@@ -13,6 +13,8 @@ from app.bot.handlers.start import help_handler, start_handler
 from app.bot.handlers.video import (
     VideoStates,
     banner_handler,
+    batch_file_handler,
+    batch_stop_callback,
     cancel_handler,
     cancel_job_callback,
     mirror_handler,
@@ -115,6 +117,9 @@ def create_dispatcher() -> Dispatcher:
         StateFilter(VideoStates.waiting_for_url),
         F.text,
     )
+    # Список ссылок .txt-файлом — в любом состоянии, кроме загрузки ассетов
+    # в админке (тот хендлер зарегистрирован раньше).
+    dp.message.register(batch_file_handler, F.document)
 
     dp.callback_query.register(
         mode_handler,
@@ -151,6 +156,7 @@ def create_dispatcher() -> Dispatcher:
         F.data == "subedit:done",
     )
     dp.callback_query.register(cancel_job_callback, F.data == "job:cancel")
+    dp.callback_query.register(batch_stop_callback, F.data == "batch:stop")
 
     # ------------------------------------------
     # Админ-панель

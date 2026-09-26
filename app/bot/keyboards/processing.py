@@ -42,28 +42,48 @@ def get_mirror_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def get_subtitles_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="✅ Да, автоматически",
-                    callback_data="subtitles:yes",
-                ),
-            ],
+def get_subtitles_keyboard(allow_edit: bool = True) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                text="✅ Да, автоматически",
+                callback_data="subtitles:yes",
+            ),
+        ],
+    ]
+
+    if allow_edit:
+        rows.append(
             [
                 InlineKeyboardButton(
                     text="✏️ Да, с проверкой текста",
                     callback_data="subtitles:edit",
                 ),
-            ],
+            ]
+        )
+
+    rows += [
+        [
+            InlineKeyboardButton(
+                text="❌ Без субтитров",
+                callback_data="subtitles:no",
+            ),
+        ],
+        [CANCEL_BUTTON],
+    ]
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_batch_stop_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="❌ Без субтитров",
-                    callback_data="subtitles:no",
+                    text="⏹ Остановить после текущего видео",
+                    callback_data="batch:stop",
                 ),
             ],
-            [CANCEL_BUTTON],
         ]
     )
 

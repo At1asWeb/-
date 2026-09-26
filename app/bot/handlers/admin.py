@@ -4,6 +4,7 @@
 - 📢 Баннеры / 🎵 Музыка / 🌄 Фоны — список, добавление, удаление;
 - 📊 Статистика обработок;
 - ⚙️ Настройки (музыка, громкость, геометрия и прозрачность баннера);
+- 📝 Субтитры (размер, положение, цвета) с предпросмотром;
 - 🧹 Очистка временных файлов.
 """
 
@@ -25,9 +26,12 @@ from app.processing.library import (
 )
 from app.processing.lock import is_processing, queue_size
 from app.processing.media import get_duration, get_video_size, probe
+from app.processing.subtitles import render_subtitles_preview
 from app.storage import (
     BANNER_FIT_MODES,
     BANNER_HEIGHT_AUTO_BELOW,
+    SUBTITLE_COLORS,
+    SUBTITLE_SETTING_KEYS,
     get_runtime,
     get_stats,
     reset_runtime,
@@ -46,6 +50,7 @@ from app.bot.keyboards.admin import (
     get_settings_keyboard,
     get_stats_keyboard,
     get_stats_reset_confirm_keyboard,
+    get_subtitle_settings_keyboard,
 )
 
 
@@ -158,6 +163,37 @@ async def admin_callback_handler(callback: CallbackQuery, state: FSMContext):
 
     if action == "pv":
         await _send_preview(callback, int(parts[2]))
+        return
+
+    if action == "subs":
+        await callback.answer()
+        await _show_subtitle_settings(callback)
+        return
+
+    if action == "subset":
+        await _change_subtitle_setting(callback, parts[2], parts[3])
+        return
+
+    if action == "subcolor":
+        await _cycle_subtitle_color(callback, parts[2])
+        return
+
+    if action == "subreset":
+        reset_runtime(SUBTITLE_SETTING_KEYS)
+        await callback.answer("Настройки субтитров сброшены")
+        await _show_subtitle_settings(callback)
+        return
+
+    if action == "subpv":
+        await _send_subtitles_preview(callback, None)
+        return
+
+    if action == "subpvlist":
+        await _show_subtitles_preview_list(callback)
+        return
+
+    if action == "subpvb":
+        await _send_subtitles_preview(callback, int(parts[2]))
         return
 
     if action == "cleanup":
@@ -704,6 +740,143 @@ async def _send_preview(callback: CallbackQuery, index: int) -> None:
     await callback.message.answer(
         _settings_text(runtime),
         reply_markup=get_settings_keyboard(runtime),
+    )
+
+
+# ==========================================
+# НАСТРОЙКИ СУБТИТРОВ
+# ==========================================
+
+def _subtitle_settings_text(runtime: dict) -> str:
+    return (
+        "📝 Настройки субтитров\n\n"
+        "Изменения применяются к следующим обработкам. "
+        "Значения указаны для кадра 1080x1920 и масштабируются под видео.\n\n"
+        f"🔠 Размер шрифта: {runtime['subtitle_font_size']}\n"
+        f"⬇️ Отступ снизу: {runtime['subtitle_bottom_offset_percent']}% высоты\n"
+        f"↔️ Поля по бокам: {runtime['subtitle_margin_percent']}% ширины\n"
+        f"📏 Символов в строке: до {runtime['subtitle_max_line_length']} "
+        "(не больше 2 строк на фразу)\n"
+        f"🖌 Толщина обводки: {runtime['subtitle_outline']}\n"
+        f"🎨 Цвет текста: {SUBTITLE_COLORS[runtime['subtitle_text_color']][0]}\n"
+        f"🎨 Цвет обводки: {SUBTITLE_COLORS[runtime['subtitle_outline_color']][0]}\n\n"
+        "Проверить, как выглядит, — «👁 Предпросмотр». "
+        "«С баннером» покажет, не пересекаются ли субтитры с рекламой."
+    )
+
+
+async def _show_subtitle_settings(callback: CallbackQuery) -> None:
+    runtime = get_runtime()
+    await _edit(
+        callback,
+        _subtitle_settings_text(runtime),
+        get_subtitle_settings_keyboard(runtime),
+    )
+
+
+async def _change_subtitle_setting(
+    callback: CallbackQuery,
+    key: str,
+    delta_text: str,
+) -> None:
+    runtime = get_runtime()
+
+    try:
+        if key not in SUBTITLE_SETTING_KEYS:
+            raise KeyError(key)
+
+        update_runtime(**{key: runtime[key] + int(delta_text)})
+    except (KeyError, ValueError):
+        await callback.answer("Неизвестная настройка", show_alert=True)
+        return
+
+    await callback.answer()
+    await _show_subtitle_settings(callback)
+
+
+async def _cycle_subtitle_color(callback: CallbackQuery, key: str) -> None:
+    runtime = get_runtime()
+
+    if key not in SUBTITLE_SETTING_KEYS or key not in runtime:
+        await callback.answer("Неизвестная настройка", show_alert=True)
+        return
+
+    colors = list(SUBTITLE_COLORS)
+    current = runtime[key]
+    index = colors.index(current) if current in colors else 0
+    new_color = colors[(index + 1) % len(colors)]
+
+    update_runtime(**{key: new_color})
+    await callback.answer(f"Цвет: {SUBTITLE_COLORS[new_color][0]}")
+    await _show_subtitle_settings(callback)
+
+
+async def _show_subtitles_preview_list(callback: CallbackQuery) -> None:
+    banners = list_assets("banners")
+
+    if not banners:
+        await callback.answer("Баннеров нет. Добавьте их в разделе «Баннеры».", show_alert=True)
+        return
+
+    await callback.answer()
+    await _edit(
+        callback,
+        "👁 Предпросмотр субтитров с баннером\n\n"
+        "Выберите баннер — пришлю кадр 1080x1920 с текущими настройками.",
+        get_preview_keyboard(
+            [file.name for file in banners],
+            prefix="adm:subpvb",
+            back="adm:subs",
+        ),
+    )
+
+
+async def _send_subtitles_preview(
+    callback: CallbackQuery,
+    banner_index: int | None,
+) -> None:
+    banner = None
+
+    if banner_index is not None:
+        banners = list_assets("banners")
+
+        if banner_index >= len(banners):
+            await callback.answer("Баннер не найден", show_alert=True)
+            return
+
+        banner = banners[banner_index]
+
+    await callback.answer("Готовлю предпросмотр…")
+
+    preview_file = settings.temp_dir / f"subtitles_preview_{callback.from_user.id}.png"
+
+    try:
+        await asyncio.to_thread(render_subtitles_preview, preview_file, banner)
+
+        caption = (
+            "👁 Предпросмотр субтитров\n\n"
+            "Жёлтые линии: рамка — поля по бокам, "
+            "горизонтальная линия — нижняя граница текста.\n\n"
+            "Если текст вылезает за рамку — уменьшите шрифт или число символов "
+            "в строке. Фраза длиннее 2 строк показывается частями — здесь первая."
+        )
+
+        if banner is not None:
+            caption += f"\nБаннер: {banner.name}"
+
+        await callback.message.answer_photo(FSInputFile(preview_file), caption=caption)
+
+    except Exception as error:
+        print(f"Ошибка предпросмотра субтитров: {type(error).__name__}: {error}")
+        await callback.message.answer("❌ Не удалось построить предпросмотр.")
+
+    finally:
+        preview_file.unlink(missing_ok=True)
+
+    runtime = get_runtime()
+    await callback.message.answer(
+        _subtitle_settings_text(runtime),
+        reply_markup=get_subtitle_settings_keyboard(runtime),
     )
 
 

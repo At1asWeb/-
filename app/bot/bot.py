@@ -19,6 +19,8 @@ from app.bot.handlers.video import (
     mode_handler,
     outro_handler,
     process_video_start,
+    subtitles_edit_done_callback,
+    subtitles_edit_message_handler,
     subtitles_handler,
     text_fallback_handler,
     video_url_handler,
@@ -138,6 +140,15 @@ def create_dispatcher() -> Dispatcher:
         outro_handler,
         StateFilter(VideoStates.choosing_outro),
         F.data.startswith("outro:"),
+    )
+    dp.message.register(
+        subtitles_edit_message_handler,
+        StateFilter(VideoStates.editing_subtitles),
+        F.text,
+    )
+    dp.callback_query.register(
+        subtitles_edit_done_callback,
+        F.data == "subedit:done",
     )
     dp.callback_query.register(cancel_job_callback, F.data == "job:cancel")
 

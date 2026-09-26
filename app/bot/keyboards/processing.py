@@ -47,12 +47,34 @@ def get_subtitles_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="✅ Да, добавить",
+                    text="✅ Да, автоматически",
                     callback_data="subtitles:yes",
                 ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✏️ Да, с проверкой текста",
+                    callback_data="subtitles:edit",
+                ),
+            ],
+            [
                 InlineKeyboardButton(
                     text="❌ Без субтитров",
                     callback_data="subtitles:no",
+                ),
+            ],
+            [CANCEL_BUTTON],
+        ]
+    )
+
+
+def get_subtitles_edit_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Готово — наложить субтитры",
+                    callback_data="subedit:done",
                 ),
             ],
             [CANCEL_BUTTON],

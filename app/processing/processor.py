@@ -81,6 +81,9 @@ class ProcessingOptions:
     subtitles: bool = False
     banner_name: str | None = None
     outro: bool = True
+    # Готовый (например, отредактированный вручную) SRT —
+    # если задан, распознавание речи не запускается.
+    subtitles_file: Path | None = None
 
 
 @dataclass
@@ -98,6 +101,35 @@ class ProcessingResult:
 
 
 ProgressCallback = Callable[[str], None]
+
+
+NO_SPEECH_NOTE = "⚠️ Речь не распознана — субтитры не добавлены."
+
+
+def prepare_subtitles(input_file: Path, work_dir: Path) -> Path | None:
+    """
+    Распознаёт речь и форматирует SRT. None — если речи нет.
+    """
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    raw_srt = work_dir / "subtitles_raw.srt"
+    formatted_srt = work_dir / "subtitles.srt"
+
+    try:
+        generate_subtitles(input_video=input_file, output_srt=raw_srt)
+
+        try:
+            format_srt(input_srt=raw_srt, output_srt=formatted_srt)
+        except RuntimeError as error:
+            # format_srt бросает RuntimeError, если текста нет.
+            raise NoSpeechError(str(error)) from error
+
+    except NoSpeechError as error:
+        print(f"Субтитры пропущены: {error}")
+        return None
+
+    return formatted_srt
 
 
 def process_video(
@@ -137,25 +169,16 @@ def process_video(
 
     formatted_srt: Path | None = None
 
-    if options.subtitles:
+    if options.subtitles_file is not None:
+        formatted_srt = options.subtitles_file
+
+    elif options.subtitles:
         report("📝 Распознаю речь для субтитров…")
 
-        raw_srt = work_dir / "subtitles_raw.srt"
-        formatted_srt = work_dir / "subtitles.srt"
+        formatted_srt = prepare_subtitles(input_file, work_dir)
 
-        try:
-            generate_subtitles(input_video=input_file, output_srt=raw_srt)
-
-            try:
-                format_srt(input_srt=raw_srt, output_srt=formatted_srt)
-            except RuntimeError as error:
-                # format_srt бросает RuntimeError, если текста нет.
-                raise NoSpeechError(str(error)) from error
-
-        except NoSpeechError as error:
-            print(f"Субтитры пропущены: {error}")
-            notes.append("⚠️ Речь не распознана — субтитры не добавлены.")
-            formatted_srt = None
+        if formatted_srt is None:
+            notes.append(NO_SPEECH_NOTE)
 
     # ------------------------------------------
     # Входы FFmpeg

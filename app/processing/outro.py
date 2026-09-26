@@ -60,11 +60,14 @@ def outro_filters(
     output_label: str,
 ) -> list[str]:
     return [
-        # Основное видео обрезается по длительности: зацикленный баннер
-        # иначе делает поток бесконечным, и concat никогда не дойдёт до картинки.
+        # Основное видео приводится ровно к длительности исходника:
+        # tpad добивает последний кадр, если видео короче звука,
+        # trim обрезает бесконечный поток от зацикленного баннера.
+        # Так картинка начинается ровно там, где кончается звук.
         (
             f"{video_label}"
             f"fps={FPS},"
+            f"tpad=stop_mode=clone:stop_duration={video_duration:.3f},"
             f"trim=duration={video_duration:.3f},"
             "setpts=PTS-STARTPTS,"
             "setsar=1,"

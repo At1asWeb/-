@@ -620,7 +620,10 @@ async def _change_setting(callback: CallbackQuery, arguments: list[str]) -> None
     action = arguments[0]
 
     if action == "reset":
-        reset_runtime()
+        # Настройки субтитров сбрасываются отдельной кнопкой в своём разделе.
+        reset_runtime(
+            tuple(key for key in runtime if key not in SUBTITLE_SETTING_KEYS)
+        )
         await callback.answer("Настройки сброшены")
 
     elif action == "music_toggle":

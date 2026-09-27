@@ -515,7 +515,8 @@ async def banner_handler(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
         f"{_choices_text(await state.get_data())}\n\n"
         "🖼 Вставить картинку в конце видео?\n\n"
-        "Зеркало, субтитры и баннер на неё не накладываются.",
+        "Картинка закрывает весь кадр. Зеркало, субтитры и баннер "
+        "на неё не накладываются.",
         reply_markup=get_outro_keyboard(),
     )
 

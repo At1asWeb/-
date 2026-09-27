@@ -65,6 +65,17 @@ def outro_input_arguments(
     ]
 
 
+def _cover_filter(video_width: int, video_height: int) -> str:
+    # Картинка всегда закрывает весь кадр: масштаб «с запасом» и обрезка
+    # лишнего по центру, без полей. Картинка 9:16 (1080x1920) на вертикальном
+    # видео ложится целиком, без обрезки.
+    return (
+        f"scale={video_width}:{video_height}:"
+        "force_original_aspect_ratio=increase:flags=lanczos,"
+        f"crop={video_width}:{video_height}"
+    )
+
+
 def _main_video_filter(video_label: str, video_duration: float, fps: str | int) -> str:
     # Основное видео приводится ровно к длительности исходника:
     # tpad добивает последний кадр, если видео короче звука,
@@ -93,12 +104,9 @@ def outro_filters(
 ) -> list[str]:
     return [
         _main_video_filter(video_label, video_duration, fps),
-        # Картинка вписывается в кадр без искажений, поля — чёрные.
         (
             f"[{input_index}:v]"
-            f"scale={video_width}:{video_height}:"
-            "force_original_aspect_ratio=decrease:flags=lanczos,"
-            f"pad={video_width}:{video_height}:(ow-iw)/2:(oh-ih)/2:color=black,"
+            f"{_cover_filter(video_width, video_height)},"
             "setsar=1,"
             f"fps={fps},"
             f"trim=duration={OUTRO_DURATION:.3f},"
@@ -121,9 +129,8 @@ def outro_overlay_filters(
     fps: str | int = FPS,
 ) -> list[str]:
     """
-    Картинка поверх последних overlay_seconds секунд видео. Вписывается
-    в кадр без искажений по центру; где картинки нет (поля, прозрачные
-    места PNG) — видно видео.
+    Картинка поверх последних overlay_seconds секунд видео, на весь кадр.
+    Сквозь прозрачные места PNG видно видео.
     """
 
     start = max(0.0, video_duration - overlay_seconds)
@@ -132,8 +139,7 @@ def outro_overlay_filters(
         _main_video_filter(video_label, video_duration, fps),
         (
             f"[{input_index}:v]"
-            f"scale={video_width}:{video_height}:"
-            "force_original_aspect_ratio=decrease:flags=lanczos,"
+            f"{_cover_filter(video_width, video_height)},"
             "setsar=1,"
             f"fps={fps},"
             "format=rgba,"

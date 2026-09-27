@@ -25,6 +25,7 @@ def crop_filters(
     output_label: str,
     mirror: bool = True,
     zoom: bool = False,
+    fps: str | int = FPS,
 ) -> tuple[list[str], tuple[int, int]]:
 
     keep = 1 - 2 * CROP_PERCENT / 100
@@ -40,10 +41,10 @@ def crop_filters(
     )
 
     filters = [
-        background_filter(background_index, "[bg]"),
+        background_filter(background_index, "[bg]", fps),
         (
             "[0:v]"
-            f"fps={FPS},"
+            f"fps={fps},"
             f"{zoom_part}"
             # Обрезка сверху и снизу, высота чётная.
             f"crop=iw:trunc(ih*{keep}/2)*2:0:trunc(ih*{CROP_PERCENT / 100}/2)*2,"

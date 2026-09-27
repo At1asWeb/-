@@ -38,12 +38,12 @@ def find_outro_image() -> Path | None:
     return images[0] if images else None
 
 
-def outro_input_arguments(image_file: Path) -> list[str]:
+def outro_input_arguments(image_file: Path, fps: str | int = FPS) -> list[str]:
     return [
         "-loop",
         "1",
         "-framerate",
-        str(FPS),
+        str(fps),
         "-t",
         f"{OUTRO_DURATION:.3f}",
         "-i",
@@ -58,6 +58,7 @@ def outro_filters(
     video_height: int,
     video_duration: float,
     output_label: str,
+    fps: str | int = FPS,
 ) -> list[str]:
     return [
         # Основное видео приводится ровно к длительности исходника:
@@ -66,7 +67,7 @@ def outro_filters(
         # Так картинка начинается ровно там, где кончается звук.
         (
             f"{video_label}"
-            f"fps={FPS},"
+            f"fps={fps},"
             f"tpad=stop_mode=clone:stop_duration={video_duration:.3f},"
             f"trim=duration={video_duration:.3f},"
             "setpts=PTS-STARTPTS,"
@@ -81,7 +82,7 @@ def outro_filters(
             "force_original_aspect_ratio=decrease:flags=lanczos,"
             f"pad={video_width}:{video_height}:(ow-iw)/2:(oh-ih)/2:color=black,"
             "setsar=1,"
-            f"fps={FPS},"
+            f"fps={fps},"
             f"trim=duration={OUTRO_DURATION:.3f},"
             "setpts=PTS-STARTPTS,"
             "format=yuv420p"

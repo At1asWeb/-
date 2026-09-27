@@ -47,12 +47,17 @@ def _download(url: str, output_dir: Path, extra_options: dict) -> Path:
 
     options = {
         "outtmpl": str(output_dir / "source.%(ext)s"),
-        "format": (
-            "bestvideo[ext=mp4][height<=1920]+bestaudio[ext=m4a]/"
-            "bestvideo[height<=1920]+bestaudio/"
-            "best[ext=mp4]/"
-            "best"
-        ),
+        # Лучшие отдельные видео- и аудиопотоки. Раньше выбирался только MP4
+        # (H.264) — у YouTube он заметно хуже VP9 при том же разрешении.
+        "format": "bv*+ba/b",
+        "format_sort": [
+            "res:2160",      # максимальное разрешение (до 4K)
+            "fps",           # 60 fps лучше 30
+            "hdr:SDR",       # SDR: HDR после перекодирования выглядит блёкло
+            "vcodec:vp9",    # VP9 > H.265 > H.264; AV1 — только если нет другого
+            "acodec",        # лучший звук (Opus/AAC)
+            "vbr",
+        ],
         "merge_output_format": "mp4",
         "quiet": True,
         "no_warnings": True,

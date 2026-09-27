@@ -198,6 +198,60 @@ def get_video_codec(file_path: Path) -> str | None:
     return video.get("codec_name")
 
 
+# Стандартные частоты кадров: исходник «притягивается» к ближайшей,
+# чтобы VFR-видео (29.98, 59.94…) не давали дробный fps.
+STANDARD_FRAME_RATES = (
+    ("24000/1001", 24000 / 1001),
+    ("24", 24.0),
+    ("25", 25.0),
+    ("30000/1001", 30000 / 1001),
+    ("30", 30.0),
+    ("48", 48.0),
+    ("50", 50.0),
+    ("60000/1001", 60000 / 1001),
+    ("60", 60.0),
+)
+
+MAX_FRAME_RATE = 60
+DEFAULT_FRAME_RATE = "30"
+
+
+def _parse_rate(value: str | None) -> float:
+    try:
+        numerator, _, denominator = (value or "").partition("/")
+        rate = float(numerator) / float(denominator or 1)
+    except (ValueError, ZeroDivisionError):
+        return 0.0
+
+    return rate
+
+
+def get_frame_rate(file_path: Path) -> str:
+    """
+    Частота кадров исходника для итогового видео (строка для FFmpeg,
+    например «30» или «60000/1001»). Не выше 60 кадров/с.
+    """
+
+    video = _first_stream(probe(file_path), "video") or {}
+
+    rate = _parse_rate(video.get("avg_frame_rate")) or _parse_rate(
+        video.get("r_frame_rate")
+    )
+
+    if rate < 10:
+        return DEFAULT_FRAME_RATE
+
+    if rate > MAX_FRAME_RATE:
+        return str(MAX_FRAME_RATE)
+
+    name, standard = min(STANDARD_FRAME_RATES, key=lambda item: abs(item[1] - rate))
+
+    if abs(standard - rate) / standard <= 0.015:
+        return name
+
+    return str(round(rate))
+
+
 def has_audio(file_path: Path) -> bool:
     return _first_stream(probe(file_path), "audio") is not None
 

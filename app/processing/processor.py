@@ -39,6 +39,7 @@ from app.processing.media import (
     ensure_output,
     file_size_mb,
     get_duration,
+    get_frame_rate,
     get_video_size,
     has_audio,
     run_ffmpeg,
@@ -180,6 +181,8 @@ def process_video(
     source_width, source_height = get_video_size(input_file)
     duration = get_duration(input_file)
     source_has_audio = has_audio(input_file)
+    # Сохраняем частоту кадров исходника (60 fps не превращается в 30).
+    fps = get_frame_rate(input_file)
 
     # ------------------------------------------
     # Субтитры: распознаём речь заранее
@@ -227,6 +230,7 @@ def process_video(
         uniq_filters, (width, height) = circle_filters(
             background_index=background_index,
             output_label="[uniq]",
+            fps=fps,
         )
 
     elif options.mode in ("crop", "zoom_crop"):
@@ -235,6 +239,7 @@ def process_video(
             output_label="[uniq]",
             mirror=options.mirror,
             zoom=options.mode == "zoom_crop",
+            fps=fps,
         )
 
     else:
@@ -242,6 +247,7 @@ def process_video(
             source_width=source_width,
             source_height=source_height,
             output_label="[uniq]",
+            fps=fps,
         )
 
     filters += uniq_filters
@@ -302,7 +308,7 @@ def process_video(
     total_duration = duration
 
     if outro_file is not None:
-        inputs += outro_input_arguments(outro_file)
+        inputs += outro_input_arguments(outro_file, fps)
 
         filters += outro_filters(
             video_label=current,
@@ -311,6 +317,7 @@ def process_video(
             video_height=height,
             video_duration=duration,
             output_label="[with_outro]",
+            fps=fps,
         )
         input_count += 1
 
@@ -381,7 +388,14 @@ def process_video(
     ]
 
     if audio_map:
-        arguments += ["-map", audio_map, "-c:a", "aac", "-b:a", "192k"]
+        arguments += [
+            "-map",
+            audio_map,
+            "-c:a",
+            "aac",
+            "-b:a",
+            f"{settings.audio_bitrate_kbps}k",
+        ]
     else:
         arguments += ["-an"]
 
@@ -391,13 +405,15 @@ def process_video(
         "-c:v",
         "libx264",
         "-preset",
-        "medium",
+        settings.video_preset,
         "-crf",
-        "20",
+        str(settings.video_crf),
+        "-profile:v",
+        "high",
         "-pix_fmt",
         "yuv420p",
         "-r",
-        "30",
+        fps,
         "-map_metadata",
         "-1",
         "-movflags",
@@ -408,7 +424,8 @@ def process_video(
     print("\n=== ПАРАМЕТРЫ ОБРАБОТКИ ===")
     print(f"Режим:       {MODES[options.mode]}")
     print(f"Исходник:    {source_width}x{source_height}, {duration:.2f} сек")
-    print(f"Результат:   {width}x{height}")
+    print(f"Результат:   {width}x{height}, {fps} fps")
+    print(f"Качество:    CRF {settings.video_crf}, preset {settings.video_preset}")
     if background_name:
         print(f"Фон:         {background_name}")
     print(f"Зеркало:     {'да' if options.mirror else 'нет'}")
@@ -438,6 +455,7 @@ def process_video(
     limit_mb = min(settings.max_output_size_mb, settings.telegram_upload_limit_mb)
 
     if file_size_mb(output_file) > limit_mb:
+        original_mb = file_size_mb(output_file)
         report("🗜 Файл слишком большой, сжимаю…")
         output_file = _compress_to_limit(
             input_file=output_file,
@@ -445,6 +463,11 @@ def process_video(
             duration=total_duration,
             limit_mb=limit_mb,
             has_audio_track=audio_map is not None,
+            work_dir=work_dir,
+        )
+        notes.append(
+            f"🗜 Сжато с {original_mb:.0f} до {file_size_mb(output_file):.0f} MB "
+            f"(лимит отправки {limit_mb:.0f} MB)."
         )
 
     elapsed = time.monotonic() - started
@@ -474,14 +497,16 @@ def _compress_to_limit(
     duration: float,
     limit_mb: float,
     has_audio_track: bool,
+    work_dir: Path,
 ) -> Path:
     """
-    Перекодирует видео с целевым битрейтом так,
-    чтобы файл уложился в лимит (с запасом 7%).
+    Перекодирует видео в два прохода с целевым битрейтом так, чтобы файл
+    уложился в лимит (с запасом 5%). Двухпроходное кодирование даёт
+    заметно лучшее качество при том же размере. Звук копируется без потерь.
     """
 
-    audio_kbps = 128 if has_audio_track else 0
-    total_kbps = limit_mb * 0.93 * 8 * 1024 / duration
+    audio_kbps = settings.audio_bitrate_kbps + 8 if has_audio_track else 0
+    total_kbps = limit_mb * 0.95 * 8 * 1024 / duration
     video_kbps = int(total_kbps - audio_kbps)
 
     if video_kbps < 300:
@@ -490,36 +515,59 @@ def _compress_to_limit(
             f"до {limit_mb:.0f} MB с приемлемым качеством."
         )
 
-    arguments = [
-        "-i",
-        str(input_file),
-        "-map",
-        "0:v:0",
-    ]
+    passlog = (work_dir / "x264_pass").resolve()
 
-    if has_audio_track:
-        arguments += ["-map", "0:a:0", "-c:a", "aac", "-b:a", f"{audio_kbps}k"]
-
-    arguments += [
+    video_arguments = [
         "-c:v",
         "libx264",
         "-preset",
-        "medium",
+        settings.video_preset,
+        "-profile:v",
+        "high",
         "-b:v",
         f"{video_kbps}k",
-        "-maxrate",
-        f"{int(video_kbps * 1.2)}k",
-        "-bufsize",
-        f"{video_kbps * 2}k",
         "-pix_fmt",
         "yuv420p",
+        "-passlogfile",
+        str(passlog),
+    ]
+
+    run_ffmpeg(
+        [
+            "-i",
+            str(input_file),
+            "-map",
+            "0:v:0",
+            *video_arguments,
+            "-pass",
+            "1",
+            "-an",
+            "-f",
+            "null",
+            "-",
+        ],
+        error_message="Не удалось сжать видео (проход 1)",
+    )
+
+    arguments = ["-i", str(input_file), "-map", "0:v:0"]
+
+    if has_audio_track:
+        arguments += ["-map", "0:a:0", "-c:a", "copy"]
+
+    arguments += [
+        *video_arguments,
+        "-pass",
+        "2",
         "-movflags",
         "+faststart",
         str(output_file),
     ]
 
-    run_ffmpeg(arguments, error_message="Не удалось сжать видео")
+    run_ffmpeg(arguments, error_message="Не удалось сжать видео (проход 2)")
     ensure_output(output_file, "Сжатие видео")
+
+    for log_file in work_dir.glob("x264_pass*"):
+        log_file.unlink(missing_ok=True)
 
     input_file.unlink(missing_ok=True)
 

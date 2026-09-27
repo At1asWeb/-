@@ -18,6 +18,7 @@ def zoom_filters(
     source_width: int,
     source_height: int,
     output_label: str,
+    fps: str | int = 30,
 ) -> tuple[list[str], tuple[int, int]]:
 
     if source_width > MAX_WIDTH:
@@ -33,6 +34,7 @@ def zoom_filters(
     filters = [
         (
             "[0:v]"
+            f"fps={fps},"
             f"scale={zoom_width}:{zoom_height}:flags=lanczos,"
             f"crop={target_width}:{target_height},"
             "setsar=1"

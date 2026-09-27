@@ -90,6 +90,12 @@ class Settings:
     max_input_size_mb: int
     max_output_size_mb: int
     telegram_upload_limit_mb: int
+    telegram_api_url: str
+
+    # Качество видео
+    video_crf: int
+    video_preset: str
+    audio_bitrate_kbps: int
 
     # Subtitles
     whisper_language: str
@@ -155,7 +161,18 @@ settings = Settings(
     max_output_size_mb=get_int("MAX_OUTPUT_SIZE_MB", 200),
     # Лимит Telegram Bot API на отправку файлов ботом (50 МБ).
     # Увеличивайте только при использовании локального Bot API сервера.
-    telegram_upload_limit_mb=get_int("TELEGRAM_UPLOAD_LIMIT_MB", 50),
+    # С локальным Bot API сервером лимит — 2000 МБ.
+    telegram_upload_limit_mb=get_int(
+        "TELEGRAM_UPLOAD_LIMIT_MB",
+        2000 if os.getenv("TELEGRAM_API_URL", "").strip() else 50,
+    ),
+    telegram_api_url=os.getenv("TELEGRAM_API_URL", "").strip().rstrip("/"),
+
+    # Качество видео: CRF меньше = лучше и тяжелее (17–18 — визуально
+    # без потерь). Preset медленнее = лучше сжатие при том же качестве.
+    video_crf=get_int("VIDEO_CRF", 17),
+    video_preset=os.getenv("VIDEO_PRESET", "slow").strip() or "slow",
+    audio_bitrate_kbps=get_int("AUDIO_BITRATE_KBPS", 256),
 
     # Subtitles
     whisper_language=os.getenv("WHISPER_LANGUAGE", "ru").strip() or "ru",

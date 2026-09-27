@@ -2,6 +2,7 @@ import asyncio
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.client.telegram import TelegramAPIServer
 from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.storage.memory import MemoryStorage
 
@@ -71,12 +72,25 @@ def create_bot() -> Bot:
     # Большой таймаут нужен для отправки видео.
     proxy_url = build_proxy_url()
 
+    session_options: dict = {"timeout": 600}
+
     if proxy_url:
         print("SOCKS5 прокси: включён")
-        session = AiohttpSession(proxy=proxy_url, timeout=600)
+        session_options["proxy"] = proxy_url
     else:
         print("SOCKS5 прокси: выключен")
-        session = AiohttpSession(timeout=600)
+
+    if settings.telegram_api_url:
+        # Локальный Bot API сервер: отправка файлов до 2000 МБ.
+        print(f"Bot API сервер: {settings.telegram_api_url}")
+        session_options["api"] = TelegramAPIServer.from_base(
+            settings.telegram_api_url,
+            is_local=True,
+        )
+
+    print(f"Лимит отправки: {settings.telegram_upload_limit_mb} МБ")
+
+    session = AiohttpSession(**session_options)
 
     return Bot(token=settings.bot_token, session=session)
 

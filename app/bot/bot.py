@@ -3,6 +3,8 @@ import asyncio
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.methods import AnswerCallbackQuery
 from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.storage.memory import MemoryStorage
 
@@ -71,6 +73,26 @@ def build_proxy_url() -> str | None:
     return f"socks5://{settings.proxy_host}:{settings.proxy_port}"
 
 
+async def _ignore_expired_callback_answer(make_request, bot, method):
+    """
+    Telegram принимает ответ на нажатие кнопки только ~15 секунд.
+    Если кнопку нажали, пока бот был выключен или перезапускался,
+    ответить уже нельзя — это не ошибка, и обработчик должен
+    продолжить работу (например, всё равно открыть нужный раздел).
+    """
+
+    try:
+        return await make_request(bot, method)
+    except TelegramBadRequest as error:
+        if isinstance(method, AnswerCallbackQuery) and (
+            "query is too old" in error.message
+            or "query ID is invalid" in error.message
+        ):
+            return True
+
+        raise
+
+
 def create_bot() -> Bot:
     # Большой таймаут нужен для отправки видео.
     proxy_url = build_proxy_url()
@@ -94,6 +116,7 @@ def create_bot() -> Bot:
     print(f"Лимит отправки: {settings.telegram_upload_limit_mb} МБ")
 
     session = AiohttpSession(**session_options)
+    session.middleware(_ignore_expired_callback_answer)
 
     return Bot(token=settings.bot_token, session=session)
 

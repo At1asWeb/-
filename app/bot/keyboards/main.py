@@ -13,6 +13,11 @@ def get_main_keyboard(
         ],
         [
             KeyboardButton(
+                text="🎨 Мои субтитры"
+            )
+        ],
+        [
+            KeyboardButton(
                 text="ℹ️ Помощь"
             )
         ],

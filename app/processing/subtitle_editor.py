@@ -124,6 +124,7 @@ def apply_edits(blocks: list[SubtitleBlock], text: str) -> EditResult:
 def write_edited_srt(
     blocks: list[SubtitleBlock],
     work_dir: Path,
+    max_line_length: int | None = None,
 ) -> Path | None:
     """
     Сохраняет правки и заново форматирует SRT (переносы строк,
@@ -147,4 +148,8 @@ def write_edited_srt(
         encoding="utf-8",
     )
 
-    return format_srt(input_srt=edited_srt, output_srt=final_srt)
+    return format_srt(
+        input_srt=edited_srt,
+        output_srt=final_srt,
+        max_length=max_line_length,
+    )

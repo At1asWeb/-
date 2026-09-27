@@ -60,6 +60,15 @@ ASSET_KINDS: dict[str, AssetKind] = {
             ".webm",
         }),
     ),
+    "fonts": AssetKind(
+        key="fonts",
+        title="🔤 Шрифты",
+        directory=settings.fonts_dir,
+        extensions=frozenset({
+            ".ttf",
+            ".otf",
+        }),
+    ),
 }
 
 

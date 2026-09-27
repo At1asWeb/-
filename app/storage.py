@@ -6,6 +6,7 @@
 """
 
 import json
+import secrets
 import threading
 import time
 from datetime import datetime, timedelta
@@ -18,6 +19,9 @@ _lock = threading.Lock()
 
 RUNTIME_FILE = settings.data_dir / "runtime_settings.json"
 STATS_FILE = settings.data_dir / "stats.json"
+TEMPLATES_FILE = settings.data_dir / "subtitle_templates.json"
+
+MAX_TEMPLATES_PER_USER = 10
 
 
 # ==========================================
@@ -274,3 +278,80 @@ def reset_stats() -> None:
     with _lock:
         if STATS_FILE.exists():
             STATS_FILE.unlink()
+
+
+# ==========================================
+# Шаблоны субтитров пользователей
+# ==========================================
+#
+# {"<user_id>": [{"id": "a1b2c3d4", "name": "...", "style": {...},
+#                 "preview_text": "..."}, ...]}
+
+def list_templates(user_id: int) -> list[dict]:
+    with _lock:
+        data = _read_json(TEMPLATES_FILE)
+
+    templates = data.get(str(user_id), [])
+    return [item for item in templates if isinstance(item, dict) and "id" in item]
+
+
+def get_template(user_id: int, template_id: str) -> dict | None:
+    return next(
+        (item for item in list_templates(user_id) if item["id"] == template_id),
+        None,
+    )
+
+
+def create_template(user_id: int, name: str, style: dict) -> dict:
+    """
+    Бросает ValueError, если достигнут лимит шаблонов.
+    """
+
+    template = {
+        "id": secrets.token_hex(4),
+        "name": name,
+        "style": style,
+        "preview_text": "",
+    }
+
+    with _lock:
+        data = _read_json(TEMPLATES_FILE)
+        templates = data.setdefault(str(user_id), [])
+
+        if len(templates) >= MAX_TEMPLATES_PER_USER:
+            raise ValueError(
+                f"Можно хранить не больше {MAX_TEMPLATES_PER_USER} шаблонов."
+            )
+
+        templates.append(template)
+        _write_json(TEMPLATES_FILE, data)
+
+    return template
+
+
+def update_template(user_id: int, template_id: str, **changes) -> dict | None:
+    with _lock:
+        data = _read_json(TEMPLATES_FILE)
+
+        for template in data.get(str(user_id), []):
+            if template.get("id") == template_id:
+                template.update(changes)
+                _write_json(TEMPLATES_FILE, data)
+                return template
+
+    return None
+
+
+def delete_template(user_id: int, template_id: str) -> bool:
+    with _lock:
+        data = _read_json(TEMPLATES_FILE)
+        templates = data.get(str(user_id), [])
+        remaining = [item for item in templates if item.get("id") != template_id]
+
+        if len(remaining) == len(templates):
+            return False
+
+        data[str(user_id)] = remaining
+        _write_json(TEMPLATES_FILE, data)
+
+    return True

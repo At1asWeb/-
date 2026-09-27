@@ -104,6 +104,7 @@ class Settings:
     banners_dir: Path
     backgrounds_dir: Path
     music_dir: Path
+    fonts_dir: Path
     outro_dir: Path
     models_dir: Path
     work_dir: Path
@@ -172,6 +173,8 @@ settings = Settings(
     banners_dir=BASE_DIR / "assets" / "banners",
     backgrounds_dir=BASE_DIR / "assets" / "backgrounds",
     music_dir=BASE_DIR / "assets" / "music",
+    # Шрифты для субтитров (TTF/OTF), доступны в шаблонах пользователей
+    fonts_dir=BASE_DIR / "assets" / "fonts",
     # Картинка-концовка (3 сек в конце каждого видео)
     outro_dir=BASE_DIR / "assets" / "outro",
     models_dir=BASE_DIR / "assets" / "models",

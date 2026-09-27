@@ -17,6 +17,7 @@ def get_admin_keyboard() -> InlineKeyboardMarkup:
             ],
             [
                 _button(ASSET_KINDS["backgrounds"].title, "adm:assets:backgrounds"),
+                _button(ASSET_KINDS["fonts"].title, "adm:assets:fonts"),
             ],
             [
                 _button("📊 Статистика", "adm:stats"),

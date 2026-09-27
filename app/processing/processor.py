@@ -51,6 +51,7 @@ from app.processing.outro import (
     outro_input_arguments,
 )
 from app.processing.subtitle_formatter import format_srt
+from app.processing.subtitle_style import fonts_dir_option, normalize_style
 from app.processing.subtitles import (
     NoSpeechError,
     generate_subtitles,
@@ -84,6 +85,8 @@ class ProcessingOptions:
     # Готовый (например, отредактированный вручную) SRT —
     # если задан, распознавание речи не запускается.
     subtitles_file: Path | None = None
+    # Стиль из шаблона пользователя; None — стандартный из админки.
+    subtitle_style: dict | None = None
 
 
 @dataclass
@@ -106,7 +109,11 @@ ProgressCallback = Callable[[str], None]
 NO_SPEECH_NOTE = "⚠️ Речь не распознана — субтитры не добавлены."
 
 
-def prepare_subtitles(input_file: Path, work_dir: Path) -> Path | None:
+def prepare_subtitles(
+    input_file: Path,
+    work_dir: Path,
+    max_line_length: int | None = None,
+) -> Path | None:
     """
     Распознаёт речь и форматирует SRT. None — если речи нет.
     """
@@ -120,7 +127,11 @@ def prepare_subtitles(input_file: Path, work_dir: Path) -> Path | None:
         generate_subtitles(input_video=input_file, output_srt=raw_srt)
 
         try:
-            format_srt(input_srt=raw_srt, output_srt=formatted_srt)
+            format_srt(
+                input_srt=raw_srt,
+                output_srt=formatted_srt,
+                max_length=max_line_length,
+            )
         except RuntimeError as error:
             # format_srt бросает RuntimeError, если текста нет.
             raise NoSpeechError(str(error)) from error
@@ -130,6 +141,13 @@ def prepare_subtitles(input_file: Path, work_dir: Path) -> Path | None:
         return None
 
     return formatted_srt
+
+
+def _max_line_length(options: ProcessingOptions) -> int | None:
+    if options.subtitle_style is None:
+        return None
+
+    return normalize_style(options.subtitle_style)["max_line_length"]
 
 
 def process_video(
@@ -175,7 +193,11 @@ def process_video(
     elif options.subtitles:
         report("📝 Распознаю речь для субтитров…")
 
-        formatted_srt = prepare_subtitles(input_file, work_dir)
+        formatted_srt = prepare_subtitles(
+            input_file,
+            work_dir,
+            max_line_length=_max_line_length(options),
+        )
 
         if formatted_srt is None:
             notes.append(NO_SPEECH_NOTE)
@@ -241,6 +263,7 @@ def process_video(
             output_ass=work_dir / "subtitles.ass",
             video_width=width,
             video_height=height,
+            style=options.subtitle_style,
         )
 
         # Относительный путь без «:» — FFmpeg запускается из корня проекта.
@@ -248,7 +271,9 @@ def process_video(
             settings.base_dir.resolve()
         ).as_posix()
 
-        filters.append(f"{current}ass=filename='{ass_relative}'[subbed]")
+        filters.append(
+            f"{current}ass=filename='{ass_relative}'{fonts_dir_option()}[subbed]"
+        )
         current = "[subbed]"
 
     # 4. Баннер — последним слоем

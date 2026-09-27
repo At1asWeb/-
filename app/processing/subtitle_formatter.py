@@ -48,8 +48,17 @@ BAD_LINE_STARTS = {
 }
 
 
-def format_srt(input_srt: Path, output_srt: Path) -> Path:
-    max_length = get_runtime()["subtitle_max_line_length"]
+def format_srt(
+    input_srt: Path,
+    output_srt: Path,
+    max_length: int | None = None,
+) -> Path:
+    """
+    max_length — символов в строке (из шаблона); None — из настроек админки.
+    """
+
+    if max_length is None:
+        max_length = get_runtime()["subtitle_max_line_length"]
 
     if not input_srt.exists():
         raise FileNotFoundError(

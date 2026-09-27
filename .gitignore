@@ -28,6 +28,8 @@ work/output/*
 assets/banners/*
 assets/music/*
 assets/outro/*
+assets/fonts/*
+!assets/fonts/.gitkeep
 !assets/outro/.gitkeep
 
 # IDE
@@ -42,3 +44,5 @@ Thumbs.db
 *.log
 # Runtime stats (contains user IDs)
 data/stats.json
+# Шаблоны субтитров пользователей
+data/subtitle_templates.json

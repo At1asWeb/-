@@ -9,6 +9,12 @@ from app.config import settings
 from app.cleanup.cleanup import cleanup_old_files
 
 from app.bot.handlers.start import help_handler, start_handler
+from app.bot.handlers.templates import (
+    TemplateStates,
+    template_input_handler,
+    templates_callback_handler,
+    templates_menu_handler,
+)
 
 from app.bot.handlers.video import (
     VideoStates,
@@ -21,6 +27,7 @@ from app.bot.handlers.video import (
     mode_handler,
     outro_handler,
     process_video_start,
+    subtitle_style_handler,
     subtitles_edit_done_callback,
     subtitles_edit_message_handler,
     subtitles_handler,
@@ -97,6 +104,7 @@ def create_dispatcher() -> Dispatcher:
 
     dp.message.register(help_handler, F.text == "ℹ️ Помощь")
     dp.message.register(process_video_start, F.text == "🎬 Обработать видео")
+    dp.message.register(templates_menu_handler, F.text == "🎨 Мои субтитры")
     dp.message.register(admin_panel_handler, F.text == "⚙️ Админ-панель")
 
     # ------------------------------------------
@@ -107,6 +115,17 @@ def create_dispatcher() -> Dispatcher:
         asset_upload_handler,
         StateFilter(AssetUploadState.waiting_for_file),
     )
+
+    # ------------------------------------------
+    # Шаблоны субтитров пользователя
+    # ------------------------------------------
+
+    dp.message.register(
+        template_input_handler,
+        StateFilter(TemplateStates.waiting_input),
+        F.text,
+    )
+    dp.callback_query.register(templates_callback_handler, F.data.startswith("tpl:"))
 
     # ------------------------------------------
     # Сценарий обработки видео
@@ -135,6 +154,11 @@ def create_dispatcher() -> Dispatcher:
         subtitles_handler,
         StateFilter(VideoStates.choosing_subtitles),
         F.data.startswith("subtitles:"),
+    )
+    dp.callback_query.register(
+        subtitle_style_handler,
+        StateFilter(VideoStates.choosing_subtitle_style),
+        F.data.startswith("substyle:"),
     )
     dp.callback_query.register(
         banner_handler,
@@ -213,6 +237,7 @@ async def main():
         settings.music_dir,
         settings.backgrounds_dir,
         settings.outro_dir,
+        settings.fonts_dir,
     ):
         directory.mkdir(parents=True, exist_ok=True)
 

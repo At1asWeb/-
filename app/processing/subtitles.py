@@ -12,17 +12,20 @@ from pathlib import Path
 
 from app.config import settings
 from app.processing.media import ensure_output, has_audio, run_ffmpeg
-from app.storage import SUBTITLE_COLORS, get_runtime
+from app.processing.subtitle_style import (
+    color_to_ass,
+    default_style,
+    fonts_dir_option,
+    normalize_style,
+)
 
 
 WHISPER_MODEL = settings.models_dir / "ggml-small.bin"
 
-# Размер и отступы субтитров задаются в админке для кадра 1080x1920
+# Размер и отступы стиля задаются для кадра 1080x1920
 # и масштабируются под реальный размер видео.
 BASE_WIDTH = 1080
 BASE_HEIGHT = 1920
-
-FONT_NAME = "Arial"
 
 SAMPLE_TEXT = "Так будут выглядеть субтитры на вашем видео"
 
@@ -113,34 +116,54 @@ def srt_to_ass(
     output_ass: Path,
     video_width: int,
     video_height: int,
+    style: dict | None = None,
 ) -> Path:
+    """
+    style — стиль шаблона пользователя; None — стандартный из админки.
+    """
 
     content = input_srt.read_text(encoding="utf-8", errors="replace").strip()
 
     blocks = re.split(r"\n\s*\n", content)
 
-    runtime = get_runtime()
-    primary_colour = SUBTITLE_COLORS[runtime["subtitle_text_color"]][1]
-    outline_colour = SUBTITLE_COLORS[runtime["subtitle_outline_color"]][1]
+    style = normalize_style(style) if style is not None else default_style()
+
+    primary_colour = color_to_ass(style["text_color"])
+    outline_colour = color_to_ass(style["outline_color"])
 
     scale = min(video_width / BASE_WIDTH, video_height / BASE_HEIGHT)
     scale = max(scale, 0.3)
 
-    font_size = round(runtime["subtitle_font_size"] * scale)
+    font_size = round(style["font_size"] * scale)
     outline = (
-        max(1, round(runtime["subtitle_outline"] * scale))
-        if runtime["subtitle_outline"]
+        max(1, round(style["outline"] * scale))
+        if style["outline"]
         else 0
     )
-    margin_h = round(video_width * runtime["subtitle_margin_percent"] / 100)
-    margin_v = round(video_height * runtime["subtitle_bottom_offset_percent"] / 100)
+    shadow = round(style["shadow"] * scale)
+    margin_h = round(video_width * style["margin_percent"] / 100)
+    margin_v = round(video_height * style["bottom_offset_percent"] / 100)
+
+    if style["box"]:
+        # BorderStyle=3: плашка цвета обводки, Outline — её внутренний отступ.
+        border_style = 3
+        outline = max(outline, round(10 * scale))
+        back_colour = color_to_ass(style["outline_color"], alpha=0x40)
+    else:
+        border_style = 1
+        back_colour = "&H80000000"   # полупрозрачная чёрная тень
+
+    bold = -1 if style["bold"] else 0
+    italic = -1 if style["italic"] else 0
 
     header = (
         "[Script Info]\n"
         "ScriptType: v4.00+\n"
         f"PlayResX: {video_width}\n"
         f"PlayResY: {video_height}\n"
-        "WrapStyle: 2\n"
+        # Умный перенос: если строка шире кадра (крупный шрифт, широкие
+        # поля), libass сам перенесёт её, а не обрежет краем кадра.
+        "WrapStyle: 0\n"
         "ScaledBorderAndShadow: yes\n"
         "\n"
         "[V4+ Styles]\n"
@@ -148,9 +171,9 @@ def srt_to_ass(
         "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
         "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
         "Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        f"Style: Default,{FONT_NAME},{font_size},{primary_colour},"
-        f"{primary_colour},{outline_colour},&H00000000,"
-        f"-1,0,0,0,100,100,0,0,1,{outline},0,2,"
+        f"Style: Default,{style['font']},{font_size},{primary_colour},"
+        f"{primary_colour},{outline_colour},{back_colour},"
+        f"{bold},{italic},0,0,100,100,0,0,{border_style},{outline},{shadow},2,"
         f"{margin_h},{margin_h},{margin_v},204\n"
         "\n"
         "[Events]\n"
@@ -176,6 +199,9 @@ def srt_to_ass(
 
         if not text:
             continue
+
+        if style["uppercase"]:
+            text = text.upper()
 
         events.append(
             "Dialogue: 0,"
@@ -203,9 +229,12 @@ def render_subtitles_preview(
     banner_file: Path | None = None,
     video_width: int = BASE_WIDTH,
     video_height: int = BASE_HEIGHT,
+    style: dict | None = None,
+    sample_text: str | None = None,
 ) -> Path:
     """
-    Рисует пример субтитров с текущими настройками на сером кадре 1080x1920.
+    Рисует пример субтитров на сером кадре 1080x1920: со стилем шаблона
+    или (style=None) со стандартными настройками из админки.
     Если передан баннер — он тоже рисуется, чтобы было видно пересечения.
     Жёлтая рамка — область, в которой переносится текст (боковые поля).
     Возвращает PNG 540x960.
@@ -215,6 +244,9 @@ def render_subtitles_preview(
     from app.processing.media import IMAGE_EXTENSIONS, get_duration
     from app.processing.subtitle_formatter import format_srt
 
+    style = normalize_style(style) if style is not None else default_style()
+    text = " ".join((sample_text or SAMPLE_TEXT).split())
+
     work_dir = output_file.parent
     work_dir.mkdir(parents=True, exist_ok=True)
 
@@ -223,18 +255,21 @@ def render_subtitles_preview(
     sample_ass = work_dir / f"{output_file.stem}.ass"
 
     raw_srt.write_text(
-        f"1\n00:00:00,000 --> 00:00:05,000\n{SAMPLE_TEXT}\n",
+        f"1\n00:00:00,000 --> 00:00:05,000\n{text}\n",
         encoding="utf-8",
     )
 
     try:
         # Те же переносы строк, что и на реальном видео.
-        format_srt(input_srt=raw_srt, output_srt=sample_srt)
-        srt_to_ass(sample_srt, sample_ass, video_width, video_height)
+        format_srt(
+            input_srt=raw_srt,
+            output_srt=sample_srt,
+            max_length=style["max_line_length"],
+        )
+        srt_to_ass(sample_srt, sample_ass, video_width, video_height, style)
 
-        runtime = get_runtime()
-        margin_h = round(video_width * runtime["subtitle_margin_percent"] / 100)
-        margin_v = round(video_height * runtime["subtitle_bottom_offset_percent"] / 100)
+        margin_h = round(video_width * style["margin_percent"] / 100)
+        margin_v = round(video_height * style["bottom_offset_percent"] / 100)
 
         # Путь без «:» — FFmpeg запускается из корня проекта (как в processor).
         ass_relative = sample_ass.resolve().relative_to(
@@ -278,7 +313,10 @@ def render_subtitles_preview(
             graph += filters
             current = "[bannered]"
 
-        graph.append(f"{current}ass=filename='{ass_relative}',scale=540:960[final]")
+        graph.append(
+            f"{current}ass=filename='{ass_relative}'{fonts_dir_option()},"
+            "scale=540:960[final]"
+        )
 
         run_ffmpeg(
             [

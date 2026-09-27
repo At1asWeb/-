@@ -26,6 +26,7 @@ from app.processing.library import (
 )
 from app.processing.lock import is_processing, queue_size
 from app.processing.media import get_duration, get_video_size, probe
+from app.processing.subtitle_style import read_font_family
 from app.processing.subtitles import render_subtitles_preview
 from app.storage import (
     BANNER_FIT_MODES,
@@ -262,6 +263,8 @@ async def _start_upload(callback: CallbackQuery, state: FSMContext, kind: str) -
         "banners": "Картинку можно отправить как фото. Видео/GIF — файлом.",
         "music": "Отправьте трек как аудио или файлом.",
         "backgrounds": "Лучше всего вертикальное видео 1080x1920 без звука.",
+        "fonts": "Отправьте файл шрифта (TTF/OTF). Для русского текста "
+        "шрифт должен поддерживать кириллицу.",
     }[kind]
 
     await _edit(
@@ -408,6 +411,14 @@ async def asset_upload_handler(message: Message, state: FSMContext):
 
 
 def _validate_media(kind: str, file: Path) -> str:
+    if kind == "fonts":
+        family = read_font_family(file)
+
+        if not family:
+            raise RuntimeError("Не удалось прочитать имя шрифта")
+
+        return f"🔤 Семейство: {family} (доступно в «🎨 Мои субтитры»)"
+
     if kind == "music":
         info = probe(file)
 
@@ -860,8 +871,8 @@ async def _send_subtitles_preview(
             "👁 Предпросмотр субтитров\n\n"
             "Жёлтые линии: рамка — поля по бокам, "
             "горизонтальная линия — нижняя граница текста.\n\n"
-            "Если текст вылезает за рамку — уменьшите шрифт или число символов "
-            "в строке. Фраза длиннее 2 строк показывается частями — здесь первая."
+            "Если строка не помещается в рамку, она переносится на следующую. "
+            "Фраза длиннее 2 строк показывается частями — здесь первая."
         )
 
         if banner is not None:

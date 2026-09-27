@@ -44,7 +44,9 @@ from app.processing.subtitle_editor import (
     read_srt_blocks,
     write_edited_srt,
 )
-from app.storage import record_processing
+from app.processing.subtitle_style import normalize_style
+from app.storage import list_templates, record_processing
+from app.bot.keyboards.templates import get_subtitle_style_keyboard
 from app.bot.keyboards.processing import (
     get_banners_keyboard,
     get_batch_stop_keyboard,
@@ -99,6 +101,7 @@ class VideoStates(StatesGroup):
     choosing_mode = State()
     choosing_mirror = State()
     choosing_subtitles = State()
+    choosing_subtitle_style = State()
     choosing_banner = State()
     choosing_outro = State()
     editing_subtitles = State()
@@ -354,13 +357,66 @@ async def subtitles_handler(callback: CallbackQuery, state: FSMContext):
     # В пакете ручной правки нет, даже если прилетела старая кнопка.
     edit_subtitles = choice == "edit" and len(data.get("source_urls") or []) <= 1
 
-    banner_names = [file.name for file in list_assets("banners")]
-
     await state.update_data(
         subtitles=subtitles,
         edit_subtitles=edit_subtitles,
-        banner_names=banner_names,
+        subtitle_style=None,
+        subtitle_style_name=None,
     )
+
+    templates = list_templates(callback.from_user.id) if subtitles else []
+
+    if templates:
+        await state.update_data(template_ids=[template["id"] for template in templates])
+        await state.set_state(VideoStates.choosing_subtitle_style)
+        await callback.answer()
+
+        await callback.message.edit_text(
+            f"Режим: {MODES[data['mode']]}\n"
+            f"Зеркало: {'да' if data.get('mirror', True) else 'нет'}\n"
+            f"Субтитры: {_subtitles_label(subtitles, edit_subtitles)}\n\n"
+            "🎨 Выберите стиль субтитров:\n"
+            "«Стандартный» — общий стиль бота, остальные — ваши шаблоны "
+            "(настраиваются в «🎨 Мои субтитры»).",
+            reply_markup=get_subtitle_style_keyboard(templates),
+        )
+        return
+
+    await _ask_banner(callback, state)
+
+
+async def subtitle_style_handler(callback: CallbackQuery, state: FSMContext):
+    choice = callback.data.split(":", 1)[1]
+    data = await state.get_data()
+
+    style = None
+    style_name = None
+
+    if choice != "std":
+        templates = {
+            template["id"]: template
+            for template in list_templates(callback.from_user.id)
+        }
+        ids = data.get("template_ids") or []
+
+        try:
+            template = templates[ids[int(choice)]]
+        except (ValueError, IndexError, KeyError):
+            await callback.answer("Шаблон не найден — возможно, удалён", show_alert=True)
+            return
+
+        # Снимок стиля: правки шаблона во время обработки её не затронут.
+        style = normalize_style(template.get("style"))
+        style_name = template["name"]
+
+    await state.update_data(subtitle_style=style, subtitle_style_name=style_name)
+    await _ask_banner(callback, state)
+
+
+async def _ask_banner(callback: CallbackQuery, state: FSMContext) -> None:
+    banner_names = [file.name for file in list_assets("banners")]
+
+    await state.update_data(banner_names=banner_names)
     await state.set_state(VideoStates.choosing_banner)
     await callback.answer()
 
@@ -369,17 +425,34 @@ async def subtitles_handler(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
         f"Режим: {MODES[data['mode']]}\n"
         f"Зеркало: {'да' if data.get('mirror', True) else 'нет'}\n"
-        f"Субтитры: {_subtitles_label(subtitles, edit_subtitles)}\n\n"
+        f"Субтитры: {_subtitles_label_from(data)}\n\n"
         "📢 Выберите рекламный баннер:",
         reply_markup=get_banners_keyboard(banner_names),
     )
 
 
-def _subtitles_label(subtitles: bool, edit_subtitles: bool) -> str:
+def _subtitles_label(
+    subtitles: bool,
+    edit_subtitles: bool,
+    style_name: str | None = None,
+) -> str:
     if not subtitles:
         return "нет"
 
-    return "да, с проверкой текста" if edit_subtitles else "да"
+    label = "да, с проверкой текста" if edit_subtitles else "да"
+
+    if style_name:
+        label += f", стиль «{style_name}»"
+
+    return label
+
+
+def _subtitles_label_from(data: dict) -> str:
+    return _subtitles_label(
+        bool(data.get("subtitles")),
+        bool(data.get("edit_subtitles")),
+        data.get("subtitle_style_name"),
+    )
 
 
 # ==========================================
@@ -432,8 +505,7 @@ async def banner_handler(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
         f"Режим: {MODES[mode]}\n"
         f"Зеркало: {'да' if data.get('mirror', True) else 'нет'}\n"
-        f"Субтитры: "
-        f"{_subtitles_label(bool(data.get('subtitles')), bool(data.get('edit_subtitles')))}\n"
+        f"Субтитры: {_subtitles_label_from(data)}\n"
         f"Баннер: {banner_name or 'без рекламы'}\n\n"
         f"🖼 Добавить картинку в конце видео ({OUTRO_DURATION:.0f} сек)?\n\n"
         "Зеркало, субтитры и баннер на неё не накладываются.",
@@ -482,6 +554,7 @@ async def _start_job(
         subtitles=bool(data.get("subtitles")),
         banner_name=banner_name,
         outro=outro,
+        subtitle_style=data.get("subtitle_style") if data.get("subtitles") else None,
     )
     is_batch = len(urls) > 1
     edit_subtitles = (
@@ -494,7 +567,8 @@ async def _start_job(
     summary = (
         f"Режим: {MODES[mode]}\n"
         f"Зеркало: {'да' if options.mirror else 'нет'}\n"
-        f"Субтитры: {_subtitles_label(options.subtitles, edit_subtitles)}\n"
+        f"Субтитры: "
+        f"{_subtitles_label(options.subtitles, edit_subtitles, data.get('subtitle_style_name'))}\n"
         f"Баннер: {banner_name or 'без рекламы'}\n"
         f"Картинка в конце: {'да' if outro else 'нет'}"
     )
@@ -559,6 +633,7 @@ async def _edit_subtitles(
     state: FSMContext,
     srt_file: Path,
     work_dir: Path,
+    max_line_length: int | None = None,
 ) -> Path | None:
     """
     Показывает текст субтитров и ждёт правок. Возвращает итоговый SRT
@@ -605,7 +680,9 @@ async def _edit_subtitles(
     if session.cancelled:
         raise JobCancelled()
 
-    return await asyncio.to_thread(write_edited_srt, session.blocks, work_dir)
+    return await asyncio.to_thread(
+        write_edited_srt, session.blocks, work_dir, max_line_length
+    )
 
 
 async def subtitles_edit_message_handler(message: Message, state: FSMContext):
@@ -688,6 +765,13 @@ class StatusUpdater:
         asyncio.run_coroutine_threadsafe(self.set(text), self.loop)
 
 
+def _style_line_length(options: ProcessingOptions) -> int | None:
+    if options.subtitle_style is None:
+        return None
+
+    return normalize_style(options.subtitle_style)["max_line_length"]
+
+
 async def run_job(
     status_message: Message,
     chat_id: int,
@@ -731,7 +815,7 @@ async def run_job(
             async with processing_slot():
                 await status.set("📝 Распознаю речь для субтитров…")
                 srt_file = await asyncio.to_thread(
-                    prepare_subtitles, source, work_dir
+                    prepare_subtitles, source, work_dir, _style_line_length(options)
                 )
 
             if srt_file is not None:
@@ -743,6 +827,7 @@ async def run_job(
                     state=state,
                     srt_file=srt_file,
                     work_dir=work_dir,
+                    max_line_length=_style_line_length(options),
                 )
 
                 if srt_file is None:

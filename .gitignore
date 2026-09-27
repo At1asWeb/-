@@ -27,6 +27,9 @@ work/output/*
 # Local assets
 assets/banners/*
 assets/music/*
+# Тяжёлые файлы: модель Whisper и фоновые видео
+assets/models/*
+assets/backgrounds/*
 assets/outro/*
 assets/fonts/*
 !assets/fonts/.gitkeep

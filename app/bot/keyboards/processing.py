@@ -132,12 +132,70 @@ def get_outro_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="🖼 Да, добавить",
+                    text="🖼 Да, вставить",
                     callback_data="outro:yes",
                 ),
                 InlineKeyboardButton(
                     text="❌ Без картинки",
                     callback_data="outro:no",
+                ),
+            ],
+            [CANCEL_BUTTON],
+        ]
+    )
+
+
+def get_outro_mode_keyboard(append_seconds: float) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"➕ В конец видео ({append_seconds:g} сек)",
+                    callback_data="outromode:append",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔲 Поверх конца видео",
+                    callback_data="outromode:overlay",
+                ),
+            ],
+            [CANCEL_BUTTON],
+        ]
+    )
+
+
+OVERLAY_SECONDS_PRESETS = (1, 2, 3, 4, 5, 7, 10)
+
+
+def get_outro_seconds_keyboard() -> InlineKeyboardMarkup:
+    buttons = [
+        InlineKeyboardButton(text=f"{seconds} сек", callback_data=f"outrosec:{seconds}")
+        for seconds in OVERLAY_SECONDS_PRESETS
+    ]
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            buttons[:4],
+            buttons[4:],
+            [
+                InlineKeyboardButton(
+                    text="✏️ Своё значение",
+                    callback_data="outrosec:custom",
+                ),
+            ],
+            [CANCEL_BUTTON],
+        ]
+    )
+
+
+def get_outro_seconds_confirm_keyboard(seconds: float) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"✅ Наложить на {seconds:g} сек и запустить",
+                    callback_data=f"outrosec:{seconds:g}",
                 ),
             ],
             [CANCEL_BUTTON],

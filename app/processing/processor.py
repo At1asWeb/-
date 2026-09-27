@@ -9,7 +9,8 @@
                         в Crop зеркалится только видео, до наложения на фон
     3. Субтитры       — поверх уже обработанного видео (текст читается)
     4. Баннер         — поверх всего (баннер не зеркалится)
-    5. Концовка       — картинка из assets/outro на 3 сек в конце
+    5. Концовка       — по выбору: картинка из assets/outro после видео
+                        на 3 сек или поверх последних N сек
                         (без зеркала, субтитров и баннера)
     +  Фоновая музыка
 
@@ -47,9 +48,12 @@ from app.processing.media import (
 from app.processing.music import pick_music
 from app.processing.outro import (
     OUTRO_DURATION,
+    OVERLAY_MAX_SECONDS,
+    OVERLAY_MIN_SECONDS,
     find_outro_image,
     outro_filters,
     outro_input_arguments,
+    outro_overlay_filters,
 )
 from app.processing.subtitle_formatter import format_srt
 from app.processing.subtitle_style import fonts_dir_option, normalize_style
@@ -82,7 +86,10 @@ class ProcessingOptions:
     mirror: bool = True
     subtitles: bool = False
     banner_name: str | None = None
-    outro: bool = True
+    outro: bool = False
+    # append — после видео на 3 сек, overlay — поверх последних секунд.
+    outro_mode: str = "append"
+    outro_overlay_seconds: float = OUTRO_DURATION
     # Готовый (например, отредактированный вручную) SRT —
     # если задан, распознавание речи не запускается.
     subtitles_file: Path | None = None
@@ -100,6 +107,8 @@ class ProcessingResult:
     subtitles_added: bool
     banner_added: bool
     outro_added: bool
+    # Как добавлена картинка: «в конце на 3 сек» / «поверх последних 5 сек».
+    outro_label: str | None
     music_name: str | None
     notes: list[str] = field(default_factory=list)
 
@@ -303,11 +312,42 @@ def process_video(
         filters += banner_chain
         current = "[bannered]"
 
-    # 5. Концовка — приклеивается после всех эффектов
+    # 5. Концовка — после всех эффектов
     outro_file = find_outro_image() if options.outro else None
     total_duration = duration
+    outro_label: str | None = None
 
-    if outro_file is not None:
+    if outro_file is not None and options.outro_mode == "overlay":
+        overlay_seconds = min(
+            max(options.outro_overlay_seconds, OVERLAY_MIN_SECONDS),
+            OVERLAY_MAX_SECONDS,
+            duration,
+        )
+
+        inputs += outro_input_arguments(outro_file, fps, overlay_seconds)
+
+        filters += outro_overlay_filters(
+            video_label=current,
+            input_index=input_count,
+            video_width=width,
+            video_height=height,
+            video_duration=duration,
+            overlay_seconds=overlay_seconds,
+            output_label="[with_outro]",
+            fps=fps,
+        )
+        input_count += 1
+
+        current = "[with_outro]"
+        outro_label = f"поверх последних {overlay_seconds:g} сек"
+
+        if overlay_seconds < options.outro_overlay_seconds:
+            notes.append(
+                f"ℹ️ Видео короче {options.outro_overlay_seconds:g} сек — "
+                f"картинка наложена на {overlay_seconds:g} сек."
+            )
+
+    elif outro_file is not None:
         inputs += outro_input_arguments(outro_file, fps)
 
         filters += outro_filters(
@@ -323,6 +363,7 @@ def process_video(
 
         current = "[with_outro]"
         total_duration = duration + OUTRO_DURATION
+        outro_label = f"в конце на {OUTRO_DURATION:g} сек"
 
     filters.append(f"{current}format=yuv420p[vout]")
 
@@ -431,7 +472,10 @@ def process_video(
     print(f"Зеркало:     {'да' if options.mirror else 'нет'}")
     print(f"Субтитры:    {'да' if ass_file else 'нет'}")
     print(f"Баннер:      {banner_file.name if banner_file else 'нет'}")
-    print(f"Концовка:    {outro_file.name if outro_file else 'нет'}")
+    print(
+        f"Концовка:    "
+        f"{f'{outro_file.name} ({outro_label})' if outro_file else 'нет'}"
+    )
     print(
         f"Музыка:      "
         f"{f'{music_file.name} ({music_volume * 100:.1f}%)' if music_file else 'нет'}"
@@ -486,6 +530,7 @@ def process_video(
         subtitles_added=ass_file is not None,
         banner_added=banner_file is not None,
         outro_added=outro_file is not None,
+        outro_label=outro_label,
         music_name=music_file.name if music_file else None,
         notes=notes,
     )

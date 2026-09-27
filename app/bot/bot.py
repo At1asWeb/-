@@ -27,6 +27,9 @@ from app.bot.handlers.video import (
     mirror_handler,
     mode_handler,
     outro_handler,
+    outro_mode_handler,
+    outro_seconds_handler,
+    outro_seconds_message_handler,
     process_video_start,
     subtitle_style_handler,
     subtitles_edit_done_callback,
@@ -183,6 +186,21 @@ def create_dispatcher() -> Dispatcher:
         outro_handler,
         StateFilter(VideoStates.choosing_outro),
         F.data.startswith("outro:"),
+    )
+    dp.callback_query.register(
+        outro_mode_handler,
+        StateFilter(VideoStates.choosing_outro_mode),
+        F.data.startswith("outromode:"),
+    )
+    dp.callback_query.register(
+        outro_seconds_handler,
+        StateFilter(VideoStates.choosing_outro_seconds),
+        F.data.startswith("outrosec:"),
+    )
+    dp.message.register(
+        outro_seconds_message_handler,
+        StateFilter(VideoStates.choosing_outro_seconds),
+        F.text,
     )
     dp.message.register(
         subtitles_edit_message_handler,

@@ -29,7 +29,12 @@ from app.processing.downloader import DownloadError, download_video
 from app.processing.library import list_assets
 from app.processing.lock import is_processing, processing_slot, queue_size
 from app.processing.media import FFmpegError
-from app.processing.outro import OUTRO_DURATION, find_outro_image
+from app.processing.outro import (
+    OUTRO_DURATION,
+    OVERLAY_MAX_SECONDS,
+    OVERLAY_MIN_SECONDS,
+    find_outro_image,
+)
 from app.processing.processor import (
     MODES,
     NO_SPEECH_NOTE,
@@ -53,6 +58,9 @@ from app.bot.keyboards.processing import (
     get_mirror_keyboard,
     get_modes_keyboard,
     get_outro_keyboard,
+    get_outro_mode_keyboard,
+    get_outro_seconds_confirm_keyboard,
+    get_outro_seconds_keyboard,
     get_subtitles_edit_keyboard,
     get_subtitles_keyboard,
 )
@@ -104,6 +112,8 @@ class VideoStates(StatesGroup):
     choosing_subtitle_style = State()
     choosing_banner = State()
     choosing_outro = State()
+    choosing_outro_mode = State()
+    choosing_outro_seconds = State()
     editing_subtitles = State()
 
 
@@ -503,29 +513,137 @@ async def banner_handler(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
     await callback.message.edit_text(
-        f"Режим: {MODES[mode]}\n"
-        f"Зеркало: {'да' if data.get('mirror', True) else 'нет'}\n"
-        f"Субтитры: {_subtitles_label_from(data)}\n"
-        f"Баннер: {banner_name or 'без рекламы'}\n\n"
-        f"🖼 Добавить картинку в конце видео ({OUTRO_DURATION:.0f} сек)?\n\n"
+        f"{_choices_text(await state.get_data())}\n\n"
+        "🖼 Вставить картинку в конце видео?\n\n"
         "Зеркало, субтитры и баннер на неё не накладываются.",
         reply_markup=get_outro_keyboard(),
     )
 
 
+def _choices_text(data: dict) -> str:
+    return (
+        f"Режим: {MODES[data['mode']]}\n"
+        f"Зеркало: {'да' if data.get('mirror', True) else 'нет'}\n"
+        f"Субтитры: {_subtitles_label_from(data)}\n"
+        f"Баннер: {data.get('banner_name') or 'без рекламы'}"
+    )
+
+
 # ==========================================
-# ШАГ 6. КАРТИНКА В КОНЦЕ → ЗАПУСК
+# ШАГ 6. КАРТИНКА В КОНЦЕ: да/нет → куда → на сколько секунд → ЗАПУСК
 # ==========================================
 
 async def outro_handler(callback: CallbackQuery, state: FSMContext):
-    outro = callback.data.split(":", 1)[1] == "yes"
-    await _start_job(callback, state, outro=outro)
+    if callback.data.split(":", 1)[1] != "yes":
+        await _start_job(callback, state, outro=False)
+        return
+
+    await state.set_state(VideoStates.choosing_outro_mode)
+    await callback.answer()
+
+    await callback.message.edit_text(
+        f"{_choices_text(await state.get_data())}\n\n"
+        "🖼 Как вставить картинку?\n\n"
+        f"➕ <b>В конец видео</b> — картинка показывается {OUTRO_DURATION:g} сек "
+        "после окончания видео (видео станет длиннее).\n"
+        "🔲 <b>Поверх конца видео</b> — картинка накладывается на последние "
+        "секунды видео, звук продолжает идти, длина не меняется.",
+        reply_markup=get_outro_mode_keyboard(OUTRO_DURATION),
+        parse_mode="HTML",
+    )
+
+
+async def outro_mode_handler(callback: CallbackQuery, state: FSMContext):
+    if callback.data.split(":", 1)[1] != "overlay":
+        await _start_job(callback, state, outro=True, outro_mode="append")
+        return
+
+    await state.set_state(VideoStates.choosing_outro_seconds)
+    await callback.answer()
+
+    await callback.message.edit_text(
+        f"{_choices_text(await state.get_data())}\n\n"
+        "🔲 На сколько последних секунд наложить картинку?\n\n"
+        f"Своё значение — от {OVERLAY_MIN_SECONDS:g} до {OVERLAY_MAX_SECONDS:g} сек. "
+        "Если видео короче, картинка будет на всё видео.",
+        reply_markup=get_outro_seconds_keyboard(),
+    )
+
+
+async def outro_seconds_handler(callback: CallbackQuery, state: FSMContext):
+    choice = callback.data.split(":", 1)[1]
+
+    if choice == "custom":
+        await callback.answer()
+        await callback.message.edit_text(
+            f"{_choices_text(await state.get_data())}\n\n"
+            "✏️ Отправьте число секунд, например 4 или 2.5 "
+            f"(от {OVERLAY_MIN_SECONDS:g} до {OVERLAY_MAX_SECONDS:g}).",
+            reply_markup=get_outro_seconds_keyboard(),
+        )
+        return
+
+    seconds = _parse_seconds(choice)
+
+    if seconds is None:
+        await callback.answer("Некорректное значение", show_alert=True)
+        return
+
+    await _start_job(
+        callback,
+        state,
+        outro=True,
+        outro_mode="overlay",
+        overlay_seconds=seconds,
+    )
+
+
+async def outro_seconds_message_handler(message: Message, state: FSMContext):
+    seconds = _parse_seconds(message.text)
+
+    if seconds is None:
+        await message.answer(
+            f"❌ Нужно число от {OVERLAY_MIN_SECONDS:g} до {OVERLAY_MAX_SECONDS:g}, "
+            "например 4 или 2.5.",
+            reply_markup=get_outro_seconds_keyboard(),
+        )
+        return
+
+    # Запуск идёт через кнопку: так используется общий путь с callback.
+    await message.answer(
+        f"Картинка будет поверх последних {seconds:g} сек.",
+        reply_markup=get_outro_seconds_confirm_keyboard(seconds),
+    )
+
+
+def _parse_seconds(text: str | None) -> float | None:
+    try:
+        seconds = round(float((text or "").strip().replace(",", ".")), 1)
+    except ValueError:
+        return None
+
+    if not OVERLAY_MIN_SECONDS <= seconds <= OVERLAY_MAX_SECONDS:
+        return None
+
+    return seconds
+
+
+def _outro_label(outro: bool, outro_mode: str, overlay_seconds: float) -> str:
+    if not outro:
+        return "нет"
+
+    if outro_mode == "overlay":
+        return f"поверх последних {overlay_seconds:g} сек"
+
+    return f"в конце на {OUTRO_DURATION:g} сек"
 
 
 async def _start_job(
     callback: CallbackQuery,
     state: FSMContext,
     outro: bool,
+    outro_mode: str = "append",
+    overlay_seconds: float = OUTRO_DURATION,
 ) -> None:
     data = await state.get_data()
 
@@ -554,6 +672,8 @@ async def _start_job(
         subtitles=bool(data.get("subtitles")),
         banner_name=banner_name,
         outro=outro,
+        outro_mode=outro_mode,
+        outro_overlay_seconds=overlay_seconds,
         subtitle_style=data.get("subtitle_style") if data.get("subtitles") else None,
     )
     is_batch = len(urls) > 1
@@ -570,7 +690,7 @@ async def _start_job(
         f"Субтитры: "
         f"{_subtitles_label(options.subtitles, edit_subtitles, data.get('subtitle_style_name'))}\n"
         f"Баннер: {banner_name or 'без рекламы'}\n"
-        f"Картинка в конце: {'да' if outro else 'нет'}"
+        f"Картинка в конце: {_outro_label(outro, outro_mode, overlay_seconds)}"
     )
 
     _active_users.add(user_id)
@@ -864,7 +984,7 @@ async def run_job(
             f"Зеркало: {'да' if result.mirrored else 'нет'}",
             f"Субтитры: {'да' if result.subtitles_added else 'нет'}",
             f"Баннер: {'да' if result.banner_added else 'нет'}",
-            f"Картинка в конце: {'да' if result.outro_added else 'нет'}",
+            f"Картинка в конце: {result.outro_label or 'нет'}",
             f"Размер: {result.size_mb:.2f} MB",
         ]
 

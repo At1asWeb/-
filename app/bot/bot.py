@@ -293,6 +293,7 @@ async def main():
         settings.backgrounds_dir,
         settings.outro_dir,
         settings.fonts_dir,
+        settings.overlays_dir,
     ):
         directory.mkdir(parents=True, exist_ok=True)
 

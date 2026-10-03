@@ -73,6 +73,7 @@ RUNTIME_LIMITS: dict[str, tuple[float, float]] = {
     "subtitle_margin_percent": (0, 30),
     "subtitle_outline": (0, 15),
     "subtitle_max_line_length": (12, 50),
+    "top_overlay_height_percent": (10, 70),
 }
 
 # Цвета субтитров: ключ -> (название, цвет ASS &HAABBGGRR).
@@ -87,6 +88,8 @@ SUBTITLE_COLORS: dict[str, tuple[str, str]] = {
 }
 
 SUBTITLE_COLOR_KEYS = ("subtitle_text_color", "subtitle_outline_color")
+
+TOP_OVERLAY_KEYS = ("top_overlay_height_percent",)
 
 SUBTITLE_SETTING_KEYS = (
     "subtitle_font_size",
@@ -119,6 +122,8 @@ def _runtime_defaults() -> dict:
         "subtitle_max_line_length": 30,
         "subtitle_text_color": "white",
         "subtitle_outline_color": "pink",
+        # Режим «видео сверху»: высота наложения, % от высоты кадра.
+        "top_overlay_height_percent": 30,
     }
 
 

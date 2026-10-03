@@ -62,6 +62,11 @@ from app.processing.subtitles import (
     generate_subtitles,
     srt_to_ass,
 )
+from app.processing.top_overlay import (
+    overlay_input_arguments,
+    pick_overlay_video,
+    top_overlay_filters,
+)
 from app.processing.zoom import zoom_filters
 
 
@@ -70,14 +75,15 @@ MODES = {
     "zoom": "🔍 Zoom +15%",
     "crop": "✂️ Crop 15%",
     "zoom_crop": "🔍✂️ Zoom + Crop 15%",
+    "top_overlay": "🎞 Crop + Zoom 10% + видео сверху",
 }
 
 # Режимы, которые используют фоновое видео из assets/backgrounds.
-BACKGROUND_MODES = {"circle", "crop", "zoom_crop"}
+BACKGROUND_MODES = {"circle", "crop", "zoom_crop", "top_overlay"}
 
 # Режимы, где зеркалится только исходное видео (внутри своей цепочки),
 # а не весь кадр вместе с фоном.
-SELF_MIRRORED_MODES = {"crop", "zoom_crop"}
+SELF_MIRRORED_MODES = {"crop", "zoom_crop", "top_overlay"}
 
 
 @dataclass
@@ -226,6 +232,7 @@ def process_video(
     # 1. Уникализация
     background_name = None
     background_index = None
+    top_overlay_name = None
 
     if options.mode in BACKGROUND_MODES:
         background_arguments, background_file = background_input_arguments()
@@ -248,6 +255,22 @@ def process_video(
             output_label="[uniq]",
             mirror=options.mirror,
             zoom=options.mode == "zoom_crop",
+            fps=fps,
+        )
+
+    elif options.mode == "top_overlay":
+        top_overlay_file = pick_overlay_video()
+        top_overlay_name = top_overlay_file.name
+
+        inputs += overlay_input_arguments(top_overlay_file)
+        top_overlay_index = input_count
+        input_count += 1
+
+        uniq_filters, (width, height) = top_overlay_filters(
+            background_index=background_index,
+            overlay_index=top_overlay_index,
+            output_label="[uniq]",
+            mirror=options.mirror,
             fps=fps,
         )
 
@@ -469,6 +492,8 @@ def process_video(
     print(f"Качество:    CRF {settings.video_crf}, preset {settings.video_preset}")
     if background_name:
         print(f"Фон:         {background_name}")
+    if top_overlay_name:
+        print(f"Сверху:      {top_overlay_name}")
     print(f"Зеркало:     {'да' if options.mirror else 'нет'}")
     print(f"Субтитры:    {'да' if ass_file else 'нет'}")
     print(f"Баннер:      {banner_file.name if banner_file else 'нет'}")

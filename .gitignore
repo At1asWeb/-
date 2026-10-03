@@ -32,6 +32,8 @@ assets/models/*
 assets/backgrounds/*
 assets/outro/*
 assets/fonts/*
+assets/overlays/*
+!assets/overlays/.gitkeep
 !assets/fonts/.gitkeep
 !assets/outro/.gitkeep
 

@@ -111,6 +111,7 @@ class Settings:
     backgrounds_dir: Path
     music_dir: Path
     fonts_dir: Path
+    overlays_dir: Path
     outro_dir: Path
     models_dir: Path
     work_dir: Path
@@ -192,6 +193,8 @@ settings = Settings(
     music_dir=BASE_DIR / "assets" / "music",
     # Шрифты для субтитров (TTF/OTF), доступны в шаблонах пользователей
     fonts_dir=BASE_DIR / "assets" / "fonts",
+    # Видео для наложения сверху (режим «Crop + Zoom 10% + видео сверху»)
+    overlays_dir=BASE_DIR / "assets" / "overlays",
     # Картинка-концовка (3 сек в конце каждого видео)
     outro_dir=BASE_DIR / "assets" / "outro",
     models_dir=BASE_DIR / "assets" / "models",

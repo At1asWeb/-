@@ -25,6 +25,7 @@ def get_admin_keyboard() -> InlineKeyboardMarkup:
             ],
             [
                 _button("📝 Субтитры", "adm:subs"),
+                _button("🎞 Видео сверху", "adm:top"),
             ],
             [
                 _button("🧹 Очистить временные файлы", "adm:cleanup"),
@@ -59,6 +60,32 @@ def get_asset_delete_keyboard(kind: str, names: list[str]) -> InlineKeyboardMark
     rows.append([_button("◀️ Назад", f"adm:assets:{kind}")])
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+TOP_OVERLAY_PRESETS = (20, 25, 30, 35, 40, 50)
+
+
+def get_top_overlay_keyboard(runtime: dict, files_count: int) -> InlineKeyboardMarkup:
+    height = runtime["top_overlay_height_percent"]
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                _button("➖5", "adm:topset:-5"),
+                _button("➖1", "adm:topset:-1"),
+                _button(f"Высота {height}%", "adm:noop"),
+                _button("➕1", "adm:topset:1"),
+                _button("➕5", "adm:topset:5"),
+            ],
+            [
+                _button(f"{'✅ ' if value == height else ''}{value}%", f"adm:topval:{value}")
+                for value in TOP_OVERLAY_PRESETS
+            ],
+            [_button("👁 Предпросмотр", "adm:toppv")],
+            [_button(f"📁 Видео для наложения ({files_count})", "adm:assets:overlays")],
+            [_button("◀️ Назад", "adm:main")],
+        ]
+    )
 
 
 def get_delete_confirm_keyboard(kind: str, index: int) -> InlineKeyboardMarkup:

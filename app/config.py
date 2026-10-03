@@ -86,9 +86,16 @@ class Settings:
     temp_file_max_age_hours: int
     processing_timeout_seconds: int
     max_video_duration: int
+    max_batch_size: int
     max_input_size_mb: int
     max_output_size_mb: int
     telegram_upload_limit_mb: int
+    telegram_api_url: str
+
+    # Качество видео
+    video_crf: int
+    video_preset: str
+    audio_bitrate_kbps: int
 
     # Subtitles
     whisper_language: str
@@ -103,6 +110,9 @@ class Settings:
     banners_dir: Path
     backgrounds_dir: Path
     music_dir: Path
+    fonts_dir: Path
+    overlays_dir: Path
+    outro_dir: Path
     models_dir: Path
     work_dir: Path
     input_dir: Path
@@ -146,11 +156,24 @@ settings = Settings(
         1800,
     ),
     max_video_duration=get_int("MAX_VIDEO_DURATION", 300),
+    # Сколько ссылок можно отправить одним списком.
+    max_batch_size=get_int("MAX_BATCH_SIZE", 30),
     max_input_size_mb=get_int("MAX_INPUT_SIZE_MB", 200),
     max_output_size_mb=get_int("MAX_OUTPUT_SIZE_MB", 200),
     # Лимит Telegram Bot API на отправку файлов ботом (50 МБ).
     # Увеличивайте только при использовании локального Bot API сервера.
-    telegram_upload_limit_mb=get_int("TELEGRAM_UPLOAD_LIMIT_MB", 50),
+    # С локальным Bot API сервером лимит — 2000 МБ.
+    telegram_upload_limit_mb=get_int(
+        "TELEGRAM_UPLOAD_LIMIT_MB",
+        2000 if os.getenv("TELEGRAM_API_URL", "").strip() else 50,
+    ),
+    telegram_api_url=os.getenv("TELEGRAM_API_URL", "").strip().rstrip("/"),
+
+    # Качество видео: CRF меньше = лучше и тяжелее (17–18 — визуально
+    # без потерь). Preset медленнее = лучше сжатие при том же качестве.
+    video_crf=get_int("VIDEO_CRF", 17),
+    video_preset=os.getenv("VIDEO_PRESET", "slow").strip() or "slow",
+    audio_bitrate_kbps=get_int("AUDIO_BITRATE_KBPS", 256),
 
     # Subtitles
     whisper_language=os.getenv("WHISPER_LANGUAGE", "ru").strip() or "ru",
@@ -168,6 +191,12 @@ settings = Settings(
     banners_dir=BASE_DIR / "assets" / "banners",
     backgrounds_dir=BASE_DIR / "assets" / "backgrounds",
     music_dir=BASE_DIR / "assets" / "music",
+    # Шрифты для субтитров (TTF/OTF), доступны в шаблонах пользователей
+    fonts_dir=BASE_DIR / "assets" / "fonts",
+    # Видео для наложения сверху (режим «Crop + Zoom 10% + видео сверху»)
+    overlays_dir=BASE_DIR / "assets" / "overlays",
+    # Картинка-концовка (3 сек в конце каждого видео)
+    outro_dir=BASE_DIR / "assets" / "outro",
     models_dir=BASE_DIR / "assets" / "models",
     work_dir=BASE_DIR / "work",
     input_dir=BASE_DIR / "work" / "input",

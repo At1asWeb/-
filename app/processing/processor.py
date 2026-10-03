@@ -9,6 +9,9 @@
                         в Crop зеркалится только видео, до наложения на фон
     3. Субтитры       — поверх уже обработанного видео (текст читается)
     4. Баннер         — поверх всего (баннер не зеркалится)
+    5. Концовка       — по выбору: картинка из assets/outro после видео
+                        на 3 сек или поверх последних N сек
+                        (без зеркала, субтитров и баннера)
     +  Фоновая музыка
 
 Всё выполняется одним проходом FFmpeg (одно перекодирование = без
@@ -37,16 +40,32 @@ from app.processing.media import (
     ensure_output,
     file_size_mb,
     get_duration,
+    get_frame_rate,
     get_video_size,
     has_audio,
     run_ffmpeg,
 )
 from app.processing.music import pick_music
+from app.processing.outro import (
+    OUTRO_DURATION,
+    OVERLAY_MAX_SECONDS,
+    OVERLAY_MIN_SECONDS,
+    find_outro_image,
+    outro_filters,
+    outro_input_arguments,
+    outro_overlay_filters,
+)
 from app.processing.subtitle_formatter import format_srt
+from app.processing.subtitle_style import fonts_dir_option, normalize_style
 from app.processing.subtitles import (
     NoSpeechError,
     generate_subtitles,
     srt_to_ass,
+)
+from app.processing.top_overlay import (
+    overlay_input_arguments,
+    pick_overlay_video,
+    top_overlay_filters,
 )
 from app.processing.zoom import zoom_filters
 
@@ -56,14 +75,15 @@ MODES = {
     "zoom": "🔍 Zoom +15%",
     "crop": "✂️ Crop 15%",
     "zoom_crop": "🔍✂️ Zoom + Crop 15%",
+    "top_overlay": "🎞 Crop + Zoom 10% + видео сверху",
 }
 
 # Режимы, которые используют фоновое видео из assets/backgrounds.
-BACKGROUND_MODES = {"circle", "crop", "zoom_crop"}
+BACKGROUND_MODES = {"circle", "crop", "zoom_crop", "top_overlay"}
 
 # Режимы, где зеркалится только исходное видео (внутри своей цепочки),
 # а не весь кадр вместе с фоном.
-SELF_MIRRORED_MODES = {"crop", "zoom_crop"}
+SELF_MIRRORED_MODES = {"crop", "zoom_crop", "top_overlay"}
 
 
 @dataclass
@@ -72,6 +92,15 @@ class ProcessingOptions:
     mirror: bool = True
     subtitles: bool = False
     banner_name: str | None = None
+    outro: bool = False
+    # append — после видео на 3 сек, overlay — поверх последних секунд.
+    outro_mode: str = "append"
+    outro_overlay_seconds: float = OUTRO_DURATION
+    # Готовый (например, отредактированный вручную) SRT —
+    # если задан, распознавание речи не запускается.
+    subtitles_file: Path | None = None
+    # Стиль из шаблона пользователя; None — стандартный из админки.
+    subtitle_style: dict | None = None
 
 
 @dataclass
@@ -83,11 +112,58 @@ class ProcessingResult:
     mirrored: bool
     subtitles_added: bool
     banner_added: bool
+    outro_added: bool
+    # Как добавлена картинка: «в конце на 3 сек» / «поверх последних 5 сек».
+    outro_label: str | None
     music_name: str | None
     notes: list[str] = field(default_factory=list)
 
 
 ProgressCallback = Callable[[str], None]
+
+
+NO_SPEECH_NOTE = "⚠️ Речь не распознана — субтитры не добавлены."
+
+
+def prepare_subtitles(
+    input_file: Path,
+    work_dir: Path,
+    max_line_length: int | None = None,
+) -> Path | None:
+    """
+    Распознаёт речь и форматирует SRT. None — если речи нет.
+    """
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    raw_srt = work_dir / "subtitles_raw.srt"
+    formatted_srt = work_dir / "subtitles.srt"
+
+    try:
+        generate_subtitles(input_video=input_file, output_srt=raw_srt)
+
+        try:
+            format_srt(
+                input_srt=raw_srt,
+                output_srt=formatted_srt,
+                max_length=max_line_length,
+            )
+        except RuntimeError as error:
+            # format_srt бросает RuntimeError, если текста нет.
+            raise NoSpeechError(str(error)) from error
+
+    except NoSpeechError as error:
+        print(f"Субтитры пропущены: {error}")
+        return None
+
+    return formatted_srt
+
+
+def _max_line_length(options: ProcessingOptions) -> int | None:
+    if options.subtitle_style is None:
+        return None
+
+    return normalize_style(options.subtitle_style)["max_line_length"]
 
 
 def process_video(
@@ -120,6 +196,8 @@ def process_video(
     source_width, source_height = get_video_size(input_file)
     duration = get_duration(input_file)
     source_has_audio = has_audio(input_file)
+    # Сохраняем частоту кадров исходника (60 fps не превращается в 30).
+    fps = get_frame_rate(input_file)
 
     # ------------------------------------------
     # Субтитры: распознаём речь заранее
@@ -127,25 +205,20 @@ def process_video(
 
     formatted_srt: Path | None = None
 
-    if options.subtitles:
+    if options.subtitles_file is not None:
+        formatted_srt = options.subtitles_file
+
+    elif options.subtitles:
         report("📝 Распознаю речь для субтитров…")
 
-        raw_srt = work_dir / "subtitles_raw.srt"
-        formatted_srt = work_dir / "subtitles.srt"
+        formatted_srt = prepare_subtitles(
+            input_file,
+            work_dir,
+            max_line_length=_max_line_length(options),
+        )
 
-        try:
-            generate_subtitles(input_video=input_file, output_srt=raw_srt)
-
-            try:
-                format_srt(input_srt=raw_srt, output_srt=formatted_srt)
-            except RuntimeError as error:
-                # format_srt бросает RuntimeError, если текста нет.
-                raise NoSpeechError(str(error)) from error
-
-        except NoSpeechError as error:
-            print(f"Субтитры пропущены: {error}")
-            notes.append("⚠️ Речь не распознана — субтитры не добавлены.")
-            formatted_srt = None
+        if formatted_srt is None:
+            notes.append(NO_SPEECH_NOTE)
 
     # ------------------------------------------
     # Входы FFmpeg
@@ -159,6 +232,7 @@ def process_video(
     # 1. Уникализация
     background_name = None
     background_index = None
+    top_overlay_name = None
 
     if options.mode in BACKGROUND_MODES:
         background_arguments, background_file = background_input_arguments()
@@ -172,6 +246,7 @@ def process_video(
         uniq_filters, (width, height) = circle_filters(
             background_index=background_index,
             output_label="[uniq]",
+            fps=fps,
         )
 
     elif options.mode in ("crop", "zoom_crop"):
@@ -180,6 +255,23 @@ def process_video(
             output_label="[uniq]",
             mirror=options.mirror,
             zoom=options.mode == "zoom_crop",
+            fps=fps,
+        )
+
+    elif options.mode == "top_overlay":
+        top_overlay_file = pick_overlay_video()
+        top_overlay_name = top_overlay_file.name
+
+        inputs += overlay_input_arguments(top_overlay_file)
+        top_overlay_index = input_count
+        input_count += 1
+
+        uniq_filters, (width, height) = top_overlay_filters(
+            background_index=background_index,
+            overlay_index=top_overlay_index,
+            output_label="[uniq]",
+            mirror=options.mirror,
+            fps=fps,
         )
 
     else:
@@ -187,6 +279,7 @@ def process_video(
             source_width=source_width,
             source_height=source_height,
             output_label="[uniq]",
+            fps=fps,
         )
 
     filters += uniq_filters
@@ -208,6 +301,7 @@ def process_video(
             output_ass=work_dir / "subtitles.ass",
             video_width=width,
             video_height=height,
+            style=options.subtitle_style,
         )
 
         # Относительный путь без «:» — FFmpeg запускается из корня проекта.
@@ -215,7 +309,9 @@ def process_video(
             settings.base_dir.resolve()
         ).as_posix()
 
-        filters.append(f"{current}ass=filename='{ass_relative}'[subbed]")
+        filters.append(
+            f"{current}ass=filename='{ass_relative}'{fonts_dir_option()}[subbed]"
+        )
         current = "[subbed]"
 
     # 4. Баннер — последним слоем
@@ -239,6 +335,59 @@ def process_video(
         filters += banner_chain
         current = "[bannered]"
 
+    # 5. Концовка — после всех эффектов
+    outro_file = find_outro_image() if options.outro else None
+    total_duration = duration
+    outro_label: str | None = None
+
+    if outro_file is not None and options.outro_mode == "overlay":
+        overlay_seconds = min(
+            max(options.outro_overlay_seconds, OVERLAY_MIN_SECONDS),
+            OVERLAY_MAX_SECONDS,
+            duration,
+        )
+
+        inputs += outro_input_arguments(outro_file, fps, overlay_seconds)
+
+        filters += outro_overlay_filters(
+            video_label=current,
+            input_index=input_count,
+            video_width=width,
+            video_height=height,
+            video_duration=duration,
+            overlay_seconds=overlay_seconds,
+            output_label="[with_outro]",
+            fps=fps,
+        )
+        input_count += 1
+
+        current = "[with_outro]"
+        outro_label = f"поверх последних {overlay_seconds:g} сек"
+
+        if overlay_seconds < options.outro_overlay_seconds:
+            notes.append(
+                f"ℹ️ Видео короче {options.outro_overlay_seconds:g} сек — "
+                f"картинка наложена на {overlay_seconds:g} сек."
+            )
+
+    elif outro_file is not None:
+        inputs += outro_input_arguments(outro_file, fps)
+
+        filters += outro_filters(
+            video_label=current,
+            input_index=input_count,
+            video_width=width,
+            video_height=height,
+            video_duration=duration,
+            output_label="[with_outro]",
+            fps=fps,
+        )
+        input_count += 1
+
+        current = "[with_outro]"
+        total_duration = duration + OUTRO_DURATION
+        outro_label = f"в конце на {OUTRO_DURATION:g} сек"
+
     filters.append(f"{current}format=yuv420p[vout]")
 
     # ------------------------------------------
@@ -253,27 +402,36 @@ def process_video(
         music_index = input_count
         input_count += 1
 
-        fade_start = max(0.0, duration - 1.0)
+        # Музыка звучит и под концовкой, затухая к самому концу.
+        fade_start = max(0.0, total_duration - 1.0)
 
         filters.append(
             f"[{music_index}:a]"
             "aresample=48000,"
             f"volume={music_volume:.4f},"
-            f"atrim=duration={duration:.3f},"
+            f"atrim=duration={total_duration:.3f},"
             "asetpts=N/SR/TB,"
             f"afade=t=out:st={fade_start:.3f}:d=1"
             "[music]"
         )
 
         if source_has_audio:
+            # Оригинальный звук дополняется тишиной на время концовки.
             filters.append(
-                "[0:a]aresample=48000[orig];"
+                "[0:a]aresample=48000,"
+                f"apad=whole_dur={total_duration:.3f}[orig];"
                 "[orig][music]amix=inputs=2:duration=first:"
                 "dropout_transition=0:normalize=0[aout]"
             )
         else:
             filters.append("[music]anull[aout]")
 
+        audio_map = "[aout]"
+
+    elif source_has_audio and outro_file is not None:
+        filters.append(
+            f"[0:a]apad=whole_dur={total_duration:.3f}[aout]"
+        )
         audio_map = "[aout]"
 
     elif source_has_audio:
@@ -294,23 +452,32 @@ def process_video(
     ]
 
     if audio_map:
-        arguments += ["-map", audio_map, "-c:a", "aac", "-b:a", "192k"]
+        arguments += [
+            "-map",
+            audio_map,
+            "-c:a",
+            "aac",
+            "-b:a",
+            f"{settings.audio_bitrate_kbps}k",
+        ]
     else:
         arguments += ["-an"]
 
     arguments += [
         "-t",
-        f"{duration:.3f}",
+        f"{total_duration:.3f}",
         "-c:v",
         "libx264",
         "-preset",
-        "medium",
+        settings.video_preset,
         "-crf",
-        "20",
+        str(settings.video_crf),
+        "-profile:v",
+        "high",
         "-pix_fmt",
         "yuv420p",
         "-r",
-        "30",
+        fps,
         "-map_metadata",
         "-1",
         "-movflags",
@@ -321,12 +488,19 @@ def process_video(
     print("\n=== ПАРАМЕТРЫ ОБРАБОТКИ ===")
     print(f"Режим:       {MODES[options.mode]}")
     print(f"Исходник:    {source_width}x{source_height}, {duration:.2f} сек")
-    print(f"Результат:   {width}x{height}")
+    print(f"Результат:   {width}x{height}, {fps} fps")
+    print(f"Качество:    CRF {settings.video_crf}, preset {settings.video_preset}")
     if background_name:
         print(f"Фон:         {background_name}")
+    if top_overlay_name:
+        print(f"Сверху:      {top_overlay_name}")
     print(f"Зеркало:     {'да' if options.mirror else 'нет'}")
     print(f"Субтитры:    {'да' if ass_file else 'нет'}")
     print(f"Баннер:      {banner_file.name if banner_file else 'нет'}")
+    print(
+        f"Концовка:    "
+        f"{f'{outro_file.name} ({outro_label})' if outro_file else 'нет'}"
+    )
     print(
         f"Музыка:      "
         f"{f'{music_file.name} ({music_volume * 100:.1f}%)' if music_file else 'нет'}"
@@ -350,13 +524,19 @@ def process_video(
     limit_mb = min(settings.max_output_size_mb, settings.telegram_upload_limit_mb)
 
     if file_size_mb(output_file) > limit_mb:
+        original_mb = file_size_mb(output_file)
         report("🗜 Файл слишком большой, сжимаю…")
         output_file = _compress_to_limit(
             input_file=output_file,
             output_file=work_dir / "result_compressed.mp4",
-            duration=duration,
+            duration=total_duration,
             limit_mb=limit_mb,
             has_audio_track=audio_map is not None,
+            work_dir=work_dir,
+        )
+        notes.append(
+            f"🗜 Сжато с {original_mb:.0f} до {file_size_mb(output_file):.0f} MB "
+            f"(лимит отправки {limit_mb:.0f} MB)."
         )
 
     elapsed = time.monotonic() - started
@@ -368,12 +548,14 @@ def process_video(
 
     return ProcessingResult(
         file=output_file,
-        duration=duration,
+        duration=total_duration,
         size_mb=file_size_mb(output_file),
         mode=options.mode,
         mirrored=options.mirror,
         subtitles_added=ass_file is not None,
         banner_added=banner_file is not None,
+        outro_added=outro_file is not None,
+        outro_label=outro_label,
         music_name=music_file.name if music_file else None,
         notes=notes,
     )
@@ -385,14 +567,16 @@ def _compress_to_limit(
     duration: float,
     limit_mb: float,
     has_audio_track: bool,
+    work_dir: Path,
 ) -> Path:
     """
-    Перекодирует видео с целевым битрейтом так,
-    чтобы файл уложился в лимит (с запасом 7%).
+    Перекодирует видео в два прохода с целевым битрейтом так, чтобы файл
+    уложился в лимит (с запасом 5%). Двухпроходное кодирование даёт
+    заметно лучшее качество при том же размере. Звук копируется без потерь.
     """
 
-    audio_kbps = 128 if has_audio_track else 0
-    total_kbps = limit_mb * 0.93 * 8 * 1024 / duration
+    audio_kbps = settings.audio_bitrate_kbps + 8 if has_audio_track else 0
+    total_kbps = limit_mb * 0.95 * 8 * 1024 / duration
     video_kbps = int(total_kbps - audio_kbps)
 
     if video_kbps < 300:
@@ -401,36 +585,59 @@ def _compress_to_limit(
             f"до {limit_mb:.0f} MB с приемлемым качеством."
         )
 
-    arguments = [
-        "-i",
-        str(input_file),
-        "-map",
-        "0:v:0",
-    ]
+    passlog = (work_dir / "x264_pass").resolve()
 
-    if has_audio_track:
-        arguments += ["-map", "0:a:0", "-c:a", "aac", "-b:a", f"{audio_kbps}k"]
-
-    arguments += [
+    video_arguments = [
         "-c:v",
         "libx264",
         "-preset",
-        "medium",
+        settings.video_preset,
+        "-profile:v",
+        "high",
         "-b:v",
         f"{video_kbps}k",
-        "-maxrate",
-        f"{int(video_kbps * 1.2)}k",
-        "-bufsize",
-        f"{video_kbps * 2}k",
         "-pix_fmt",
         "yuv420p",
+        "-passlogfile",
+        str(passlog),
+    ]
+
+    run_ffmpeg(
+        [
+            "-i",
+            str(input_file),
+            "-map",
+            "0:v:0",
+            *video_arguments,
+            "-pass",
+            "1",
+            "-an",
+            "-f",
+            "null",
+            "-",
+        ],
+        error_message="Не удалось сжать видео (проход 1)",
+    )
+
+    arguments = ["-i", str(input_file), "-map", "0:v:0"]
+
+    if has_audio_track:
+        arguments += ["-map", "0:a:0", "-c:a", "copy"]
+
+    arguments += [
+        *video_arguments,
+        "-pass",
+        "2",
         "-movflags",
         "+faststart",
         str(output_file),
     ]
 
-    run_ffmpeg(arguments, error_message="Не удалось сжать видео")
+    run_ffmpeg(arguments, error_message="Не удалось сжать видео (проход 2)")
     ensure_output(output_file, "Сжатие видео")
+
+    for log_file in work_dir.glob("x264_pass*"):
+        log_file.unlink(missing_ok=True)
 
     input_file.unlink(missing_ok=True)
 

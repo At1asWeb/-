@@ -60,6 +60,26 @@ ASSET_KINDS: dict[str, AssetKind] = {
             ".webm",
         }),
     ),
+    "overlays": AssetKind(
+        key="overlays",
+        title="🎞 Видео сверху",
+        directory=settings.overlays_dir,
+        extensions=frozenset({
+            ".mp4",
+            ".mov",
+            ".mkv",
+            ".webm",
+        }),
+    ),
+    "fonts": AssetKind(
+        key="fonts",
+        title="🔤 Шрифты",
+        directory=settings.fonts_dir,
+        extensions=frozenset({
+            ".ttf",
+            ".otf",
+        }),
+    ),
 }
 
 

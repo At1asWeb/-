@@ -6,6 +6,7 @@
 """
 
 import json
+import secrets
 import threading
 import time
 from datetime import datetime, timedelta
@@ -18,6 +19,9 @@ _lock = threading.Lock()
 
 RUNTIME_FILE = settings.data_dir / "runtime_settings.json"
 STATS_FILE = settings.data_dir / "stats.json"
+TEMPLATES_FILE = settings.data_dir / "subtitle_templates.json"
+
+MAX_TEMPLATES_PER_USER = 10
 
 
 # ==========================================
@@ -64,7 +68,37 @@ RUNTIME_LIMITS: dict[str, tuple[float, float]] = {
     "banner_top_offset_percent": (0, 80),
     "banner_opacity": (0.1, 1.0),
     "music_volume_percent": (1, 30),
+    "subtitle_font_size": (30, 140),
+    "subtitle_bottom_offset_percent": (2, 90),
+    "subtitle_margin_percent": (0, 30),
+    "subtitle_outline": (0, 15),
+    "subtitle_max_line_length": (12, 50),
+    "top_overlay_height_percent": (10, 70),
 }
+
+# Цвета субтитров: ключ -> (название, цвет ASS &HAABBGGRR).
+SUBTITLE_COLORS: dict[str, tuple[str, str]] = {
+    "white": ("белый", "&H00FFFFFF"),
+    "yellow": ("жёлтый", "&H0000FFFF"),
+    "black": ("чёрный", "&H00000000"),
+    "pink": ("розово-фиолетовый", "&H00CC00FF"),
+    "red": ("красный", "&H000000FF"),
+    "green": ("зелёный", "&H0000CC00"),
+    "blue": ("синий", "&H00FF6600"),
+}
+
+SUBTITLE_COLOR_KEYS = ("subtitle_text_color", "subtitle_outline_color")
+
+TOP_OVERLAY_KEYS = ("top_overlay_height_percent",)
+
+SUBTITLE_SETTING_KEYS = (
+    "subtitle_font_size",
+    "subtitle_bottom_offset_percent",
+    "subtitle_margin_percent",
+    "subtitle_outline",
+    "subtitle_max_line_length",
+    *SUBTITLE_COLOR_KEYS,
+)
 
 
 def _runtime_defaults() -> dict:
@@ -80,12 +114,25 @@ def _runtime_defaults() -> dict:
         "banner_fit": settings.banner_fit,
         "banner_top_offset_percent": settings.banner_top_offset_percent,
         "banner_opacity": settings.banner_opacity,
+        # Субтитры (значения — для кадра 1080x1920, масштабируются под видео).
+        "subtitle_font_size": 68,
+        "subtitle_bottom_offset_percent": 15,
+        "subtitle_margin_percent": 8,
+        "subtitle_outline": 6,
+        "subtitle_max_line_length": 30,
+        "subtitle_text_color": "white",
+        "subtitle_outline_color": "pink",
+        # Режим «видео сверху»: высота наложения, % от высоты кадра.
+        "top_overlay_height_percent": 30,
     }
 
 
 def _clamp(key: str, value):
     if key == "banner_fit":
         return value if value in BANNER_FIT_MODES else "fit"
+
+    if key in SUBTITLE_COLOR_KEYS:
+        return value if value in SUBTITLE_COLORS else _runtime_defaults()[key]
 
     if key not in RUNTIME_LIMITS:
         return value
@@ -131,10 +178,22 @@ def update_runtime(**changes) -> dict:
     return get_runtime()
 
 
-def reset_runtime() -> dict:
+def reset_runtime(keys: tuple[str, ...] | None = None) -> dict:
+    """
+    Сбрасывает все настройки или только перечисленные ключи.
+    """
+
     with _lock:
-        if RUNTIME_FILE.exists():
-            RUNTIME_FILE.unlink()
+        if keys is None:
+            if RUNTIME_FILE.exists():
+                RUNTIME_FILE.unlink()
+        else:
+            stored = _read_json(RUNTIME_FILE)
+
+            for key in keys:
+                stored.pop(key, None)
+
+            _write_json(RUNTIME_FILE, stored)
 
     return get_runtime()
 
@@ -224,3 +283,80 @@ def reset_stats() -> None:
     with _lock:
         if STATS_FILE.exists():
             STATS_FILE.unlink()
+
+
+# ==========================================
+# Шаблоны субтитров пользователей
+# ==========================================
+#
+# {"<user_id>": [{"id": "a1b2c3d4", "name": "...", "style": {...},
+#                 "preview_text": "..."}, ...]}
+
+def list_templates(user_id: int) -> list[dict]:
+    with _lock:
+        data = _read_json(TEMPLATES_FILE)
+
+    templates = data.get(str(user_id), [])
+    return [item for item in templates if isinstance(item, dict) and "id" in item]
+
+
+def get_template(user_id: int, template_id: str) -> dict | None:
+    return next(
+        (item for item in list_templates(user_id) if item["id"] == template_id),
+        None,
+    )
+
+
+def create_template(user_id: int, name: str, style: dict) -> dict:
+    """
+    Бросает ValueError, если достигнут лимит шаблонов.
+    """
+
+    template = {
+        "id": secrets.token_hex(4),
+        "name": name,
+        "style": style,
+        "preview_text": "",
+    }
+
+    with _lock:
+        data = _read_json(TEMPLATES_FILE)
+        templates = data.setdefault(str(user_id), [])
+
+        if len(templates) >= MAX_TEMPLATES_PER_USER:
+            raise ValueError(
+                f"Можно хранить не больше {MAX_TEMPLATES_PER_USER} шаблонов."
+            )
+
+        templates.append(template)
+        _write_json(TEMPLATES_FILE, data)
+
+    return template
+
+
+def update_template(user_id: int, template_id: str, **changes) -> dict | None:
+    with _lock:
+        data = _read_json(TEMPLATES_FILE)
+
+        for template in data.get(str(user_id), []):
+            if template.get("id") == template_id:
+                template.update(changes)
+                _write_json(TEMPLATES_FILE, data)
+                return template
+
+    return None
+
+
+def delete_template(user_id: int, template_id: str) -> bool:
+    with _lock:
+        data = _read_json(TEMPLATES_FILE)
+        templates = data.get(str(user_id), [])
+        remaining = [item for item in templates if item.get("id") != template_id]
+
+        if len(remaining) == len(templates):
+            return False
+
+        data[str(user_id)] = remaining
+        _write_json(TEMPLATES_FILE, data)
+
+    return True

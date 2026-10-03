@@ -1,7 +1,10 @@
 from pathlib import Path
 import re
 
+from app.storage import get_runtime
 
+
+# Значение по умолчанию; рабочее берётся из настроек субтитров в админке.
 MAX_LINE_LENGTH = 30
 MAX_LINES = 2
 
@@ -45,7 +48,18 @@ BAD_LINE_STARTS = {
 }
 
 
-def format_srt(input_srt: Path, output_srt: Path) -> Path:
+def format_srt(
+    input_srt: Path,
+    output_srt: Path,
+    max_length: int | None = None,
+) -> Path:
+    """
+    max_length — символов в строке (из шаблона); None — из настроек админки.
+    """
+
+    if max_length is None:
+        max_length = get_runtime()["subtitle_max_line_length"]
+
     if not input_srt.exists():
         raise FileNotFoundError(
             f"SRT-файл не найден: {input_srt}"
@@ -98,12 +112,10 @@ def format_srt(input_srt: Path, output_srt: Path) -> Path:
         if end <= start:
             continue
 
-        chunks = _split_into_chunks(text)
+        chunks = _split_into_chunks(text, max_length)
 
         if len(chunks) == 1:
-            formatted = _format_two_lines(
-                chunks[0]
-            )
+            formatted = _format_two_lines(chunks[0], max_length)
 
             result_blocks.append(
                 _make_block(
@@ -144,9 +156,7 @@ def format_srt(input_srt: Path, output_srt: Path) -> Path:
                         + chunk_duration
                     )
 
-                formatted = _format_two_lines(
-                    chunk
-                )
+                formatted = _format_two_lines(chunk, max_length)
 
                 result_blocks.append(
                     _make_block(
@@ -175,7 +185,7 @@ def format_srt(input_srt: Path, output_srt: Path) -> Path:
     return output_srt
 
 
-def _split_into_chunks(text: str) -> list[str]:
+def _split_into_chunks(text: str, max_length: int = MAX_LINE_LENGTH) -> list[str]:
     words = text.split()
 
     if not words:
@@ -189,7 +199,7 @@ def _split_into_chunks(text: str) -> list[str]:
             current + [word]
         )
 
-        if _fits_two_lines(candidate):
+        if _fits_two_lines(candidate, max_length):
             current.append(word)
             continue
 
@@ -208,10 +218,10 @@ def _split_into_chunks(text: str) -> list[str]:
     return chunks
 
 
-def _fits_two_lines(text: str) -> bool:
+def _fits_two_lines(text: str, max_length: int = MAX_LINE_LENGTH) -> bool:
     words = text.split()
 
-    if len(text) <= MAX_LINE_LENGTH:
+    if len(text) <= max_length:
         return True
 
     for split in range(
@@ -227,21 +237,21 @@ def _fits_two_lines(text: str) -> bool:
         )
 
         if (
-            len(first) <= MAX_LINE_LENGTH
-            and len(second) <= MAX_LINE_LENGTH
+            len(first) <= max_length
+            and len(second) <= max_length
         ):
             return True
 
     return False
 
 
-def _format_two_lines(text: str) -> str:
+def _format_two_lines(text: str, max_length: int = MAX_LINE_LENGTH) -> str:
     words = text.split()
 
     if not words:
         return ""
 
-    if len(text) <= MAX_LINE_LENGTH:
+    if len(text) <= max_length:
         return text
 
     best_split = None
@@ -259,10 +269,10 @@ def _format_two_lines(text: str) -> str:
             words[split:]
         )
 
-        if len(first) > MAX_LINE_LENGTH:
+        if len(first) > max_length:
             continue
 
-        if len(second) > MAX_LINE_LENGTH:
+        if len(second) > max_length:
             continue
 
         score = _split_score(

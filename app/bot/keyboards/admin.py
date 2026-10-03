@@ -1,6 +1,7 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.processing.library import ASSET_KINDS, pretty_name
+from app.storage import SUBTITLE_COLORS
 
 
 def _button(text: str, data: str) -> InlineKeyboardButton:
@@ -16,10 +17,15 @@ def get_admin_keyboard() -> InlineKeyboardMarkup:
             ],
             [
                 _button(ASSET_KINDS["backgrounds"].title, "adm:assets:backgrounds"),
+                _button(ASSET_KINDS["fonts"].title, "adm:assets:fonts"),
             ],
             [
                 _button("📊 Статистика", "adm:stats"),
                 _button("⚙️ Настройки", "adm:settings"),
+            ],
+            [
+                _button("📝 Субтитры", "adm:subs"),
+                _button("🎞 Видео сверху", "adm:top"),
             ],
             [
                 _button("🧹 Очистить временные файлы", "adm:cleanup"),
@@ -54,6 +60,32 @@ def get_asset_delete_keyboard(kind: str, names: list[str]) -> InlineKeyboardMark
     rows.append([_button("◀️ Назад", f"adm:assets:{kind}")])
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+TOP_OVERLAY_PRESETS = (20, 25, 30, 35, 40, 50)
+
+
+def get_top_overlay_keyboard(runtime: dict, files_count: int) -> InlineKeyboardMarkup:
+    height = runtime["top_overlay_height_percent"]
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                _button("➖5", "adm:topset:-5"),
+                _button("➖1", "adm:topset:-1"),
+                _button(f"Высота {height}%", "adm:noop"),
+                _button("➕1", "adm:topset:1"),
+                _button("➕5", "adm:topset:5"),
+            ],
+            [
+                _button(f"{'✅ ' if value == height else ''}{value}%", f"adm:topval:{value}")
+                for value in TOP_OVERLAY_PRESETS
+            ],
+            [_button("👁 Предпросмотр", "adm:toppv")],
+            [_button(f"📁 Видео для наложения ({files_count})", "adm:assets:overlays")],
+            [_button("◀️ Назад", "adm:main")],
+        ]
+    )
 
 
 def get_delete_confirm_keyboard(kind: str, index: int) -> InlineKeyboardMarkup:
@@ -167,19 +199,81 @@ def get_settings_keyboard(runtime: dict) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def get_preview_keyboard(banner_names: list[str]) -> InlineKeyboardMarkup:
+def get_preview_keyboard(
+    banner_names: list[str],
+    prefix: str = "adm:pv",
+    back: str = "adm:settings",
+) -> InlineKeyboardMarkup:
     from pathlib import Path
 
     rows = [
         [
             _button(
                 f"👁 {pretty_name(Path(name), 45)}",
-                f"adm:pv:{index}",
+                f"{prefix}:{index}",
             )
         ]
         for index, name in enumerate(banner_names)
     ]
 
-    rows.append([_button("◀️ Назад", "adm:settings")])
+    rows.append([_button("◀️ Назад", back)])
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _stepper(key: str, title: str, step: int) -> list[InlineKeyboardButton]:
+    return [
+        _button("➖", f"adm:subset:{key}:{-step}"),
+        _button(title, "adm:noop"),
+        _button("➕", f"adm:subset:{key}:{step}"),
+    ]
+
+
+def get_subtitle_settings_keyboard(runtime: dict) -> InlineKeyboardMarkup:
+    text_color = SUBTITLE_COLORS[runtime["subtitle_text_color"]][0]
+    outline_color = SUBTITLE_COLORS[runtime["subtitle_outline_color"]][0]
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            _stepper(
+                "subtitle_font_size",
+                f"Шрифт {runtime['subtitle_font_size']}",
+                4,
+            ),
+            _stepper(
+                "subtitle_bottom_offset_percent",
+                f"Отступ снизу {runtime['subtitle_bottom_offset_percent']}%",
+                2,
+            ),
+            _stepper(
+                "subtitle_margin_percent",
+                f"Поля по бокам {runtime['subtitle_margin_percent']}%",
+                1,
+            ),
+            _stepper(
+                "subtitle_max_line_length",
+                f"Символов в строке {runtime['subtitle_max_line_length']}",
+                2,
+            ),
+            _stepper(
+                "subtitle_outline",
+                f"Обводка {runtime['subtitle_outline']}",
+                1,
+            ),
+            [
+                _button(f"🎨 Текст: {text_color}", "adm:subcolor:subtitle_text_color"),
+            ],
+            [
+                _button(
+                    f"🖌 Обводка: {outline_color}",
+                    "adm:subcolor:subtitle_outline_color",
+                ),
+            ],
+            [
+                _button("👁 Предпросмотр", "adm:subpv"),
+                _button("👁 С баннером", "adm:subpvlist"),
+            ],
+            [_button("↩️ Сбросить настройки субтитров", "adm:subreset")],
+            [_button("◀️ Назад", "adm:main")],
+        ]
+    )

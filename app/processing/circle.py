@@ -23,6 +23,7 @@ EDGE_SOFTNESS = 2.0
 def circle_filters(
     background_index: int,
     output_label: str,
+    fps: str | int = FPS,
 ) -> tuple[list[str], tuple[int, int]]:
     """
     Возвращает цепочки filter_complex и итоговый размер кадра.
@@ -42,10 +43,10 @@ def circle_filters(
     )
 
     filters = [
-        background_filter(background_index, "[bg]"),
+        background_filter(background_index, "[bg]", fps),
         (
             "[0:v]"
-            f"fps={FPS},"
+            f"fps={fps},"
             f"scale={CIRCLE_SIZE}:{CIRCLE_SIZE}:"
             "force_original_aspect_ratio=increase:flags=lanczos,"
             f"crop={CIRCLE_SIZE}:{CIRCLE_SIZE},"
@@ -54,7 +55,7 @@ def circle_filters(
             "[fg]"
         ),
         (
-            f"color=c=black:s={CIRCLE_SIZE}x{CIRCLE_SIZE}:r={FPS}:d=1,"
+            f"color=c=black:s={CIRCLE_SIZE}x{CIRCLE_SIZE}:r={fps}:d=1,"
             "format=gray,"
             f"geq=lum='{mask_expression}',"
             "loop=loop=-1:size=1"

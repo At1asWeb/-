@@ -1,14 +1,24 @@
 """
 Сценарий обработки видео:
 
-ссылка → режим уникализации → субтитры → баннер → очередь → результат.
+ссылка → режим уникализации → зеркало → субтитры → баннер →
+картинка в конце (если она загружена) → очередь → результат.
+
+При выборе «субтитры с проверкой текста» речь распознаётся заранее,
+пользователь правит текст в чате, и только потом видео рендерится.
+
+Пакетный режим: несколько ссылок одним сообщением (через «;», запятую,
+пробел или с новой строки) или .txt-файлом. Настройки выбираются один раз,
+видео обрабатываются по очереди. Ручная правка субтитров в пакете недоступна.
 """
 
 import asyncio
 import re
 import time
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from aiogram import Bot
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, FSInputFile, Message
@@ -19,12 +29,39 @@ from app.processing.downloader import DownloadError, download_video
 from app.processing.library import list_assets
 from app.processing.lock import is_processing, processing_slot, queue_size
 from app.processing.media import FFmpegError
-from app.processing.processor import MODES, ProcessingOptions, process_video
-from app.storage import record_processing
+from app.processing.outro import (
+    OUTRO_DURATION,
+    OVERLAY_MAX_SECONDS,
+    OVERLAY_MIN_SECONDS,
+    find_outro_image,
+)
+from app.processing.processor import (
+    MODES,
+    NO_SPEECH_NOTE,
+    ProcessingOptions,
+    prepare_subtitles,
+    process_video,
+)
+from app.processing.subtitle_editor import (
+    SubtitleBlock,
+    apply_edits,
+    editing_messages,
+    read_srt_blocks,
+    write_edited_srt,
+)
+from app.processing.subtitle_style import normalize_style
+from app.storage import list_templates, record_processing
+from app.bot.keyboards.templates import get_subtitle_style_keyboard
 from app.bot.keyboards.processing import (
     get_banners_keyboard,
+    get_batch_stop_keyboard,
     get_mirror_keyboard,
     get_modes_keyboard,
+    get_outro_keyboard,
+    get_outro_mode_keyboard,
+    get_outro_seconds_confirm_keyboard,
+    get_outro_seconds_keyboard,
+    get_subtitles_edit_keyboard,
     get_subtitles_keyboard,
 )
 
@@ -32,12 +69,39 @@ from app.bot.keyboards.processing import (
 URL_PATTERN = re.compile(
     r"https?://(?:www\.|m\.)?"
     r"(?:youtube\.com/(?:shorts/|watch\?v=)|youtu\.be/)"
-    r"[\w\-]{6,}[^\s]*",
+    # «;» и «,» — разделители в списке ссылок, не часть адреса.
+    r"[\w\-]{6,}[^\s;,]*",
     re.IGNORECASE,
 )
 
+# Список ссылок файлом: .txt до 1 МБ.
+BATCH_FILE_MAX_BYTES = 1024 * 1024
+BATCH_FILE_EXTENSIONS = (".txt", ".csv", ".list")
+
 # Пользователи, у которых прямо сейчас идёт задача.
 _active_users: set[int] = set()
+
+# Сколько ждать правки субтитров, после чего обработка продолжается
+# с текущим текстом.
+SUBTITLE_EDIT_TIMEOUT_SECONDS = 30 * 60
+
+
+class JobCancelled(Exception):
+    pass
+
+
+@dataclass
+class SubtitleEditSession:
+    blocks: list[SubtitleBlock]
+    done: asyncio.Event = field(default_factory=asyncio.Event)
+    cancelled: bool = False
+
+
+# Открытые сессии правки субтитров: user_id → сессия.
+_edit_sessions: dict[int, SubtitleEditSession] = {}
+
+# Запущенные пакеты: user_id → флаг «остановить после текущего видео».
+_batch_stops: dict[int, asyncio.Event] = {}
 
 
 class VideoStates(StatesGroup):
@@ -45,12 +109,25 @@ class VideoStates(StatesGroup):
     choosing_mode = State()
     choosing_mirror = State()
     choosing_subtitles = State()
+    choosing_subtitle_style = State()
     choosing_banner = State()
+    choosing_outro = State()
+    choosing_outro_mode = State()
+    choosing_outro_seconds = State()
+    editing_subtitles = State()
 
 
 def extract_url(text: str | None) -> str | None:
     match = URL_PATTERN.search(text or "")
     return match.group(0) if match else None
+
+
+def extract_urls(text: str | None) -> list[str]:
+    """
+    Все ссылки из текста в исходном порядке, без повторов.
+    """
+
+    return list(dict.fromkeys(URL_PATTERN.findall(text or "")))
 
 
 def has_active_jobs() -> bool:
@@ -68,16 +145,53 @@ async def process_video_start(message: Message, state: FSMContext):
     await message.answer(
         "🎬 Обработка видео\n\n"
         "Отправьте ссылку на YouTube Shorts.\n\n"
+        "📋 Можно сразу несколько: списком через «;», запятую или "
+        "с новой строки, либо .txt-файлом со ссылками — "
+        f"до {settings.max_batch_size} шт. за раз. "
+        "Настройки выберете один раз, видео обработаются по очереди.\n\n"
         "Для отмены — /cancel"
     )
 
 
 async def video_url_handler(message: Message, state: FSMContext):
-    url = extract_url(message.text)
+    await _accept_urls(message, state, extract_urls(message.text))
 
-    if url is None:
+
+async def batch_file_handler(message: Message, state: FSMContext):
+    document = message.document
+    name = (document.file_name or "").lower()
+
+    if not name.endswith(BATCH_FILE_EXTENSIONS):
         await message.answer(
-            "❌ Это не похоже на ссылку YouTube.\n\n"
+            "❌ Нужен текстовый файл (.txt) со ссылками на YouTube Shorts."
+        )
+        return
+
+    if document.file_size and document.file_size > BATCH_FILE_MAX_BYTES:
+        await message.answer("❌ Файл слишком большой (максимум 1 МБ).")
+        return
+
+    try:
+        buffer = await message.bot.download(document)
+        raw = buffer.read()
+    except Exception as error:
+        print(f"Не удалось скачать список ссылок: {error}")
+        await message.answer("❌ Не удалось прочитать файл. Попробуйте ещё раз.")
+        return
+
+    # Блокнот Windows может сохранить файл в cp1251.
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = raw.decode("cp1251", errors="replace")
+
+    await _accept_urls(message, state, extract_urls(text))
+
+
+async def _accept_urls(message: Message, state: FSMContext, urls: list[str]) -> None:
+    if not urls:
+        await message.answer(
+            "❌ Не нашёл ссылок на YouTube.\n\n"
             "Пример: https://www.youtube.com/shorts/xxxxxxxxxxx\n\n"
             "Для отмены — /cancel"
         )
@@ -90,19 +204,38 @@ async def video_url_handler(message: Message, state: FSMContext):
         )
         return
 
+    skipped = 0
+
+    if len(urls) > settings.max_batch_size:
+        skipped = len(urls) - settings.max_batch_size
+        urls = urls[: settings.max_batch_size]
+
     await state.clear()
-    await state.update_data(source_url=url)
+    await state.update_data(source_url=urls[0], source_urls=urls)
     await state.set_state(VideoStates.choosing_mode)
 
+    if len(urls) == 1:
+        accepted = "🔗 Ссылка принята."
+    else:
+        accepted = f"📋 Принято ссылок: {len(urls)}. Обработаю их по очереди."
+
+        if skipped:
+            accepted += (
+                f"\n⚠️ Лишние {skipped} пропущены "
+                f"(максимум {settings.max_batch_size} за раз)."
+            )
+
     await message.answer(
-        "🔗 Ссылка принята.\n\n"
+        f"{accepted}\n\n"
         "Выберите вид уникализации:\n\n"
         "⭕ <b>Circle</b> — видео в круге на анимированном фоне\n"
         "🔍 <b>Zoom +15%</b> — увеличение кадра на 15%\n"
         "✂️ <b>Crop 15%</b> — обрезка сверху и снизу по 15%, "
         "видео на анимированном фоне\n"
         "🔍✂️ <b>Zoom + Crop 15%</b> — приближение на 15%, затем обрезка "
-        "сверху и снизу по 15%, видео на анимированном фоне\n\n"
+        "сверху и снизу по 15%, видео на анимированном фоне\n"
+        "🎞 <b>Crop + Zoom 10% + видео сверху</b> — приближение и обрезка "
+        "по 10%, сверху на всю ширину кадра — дополнительное видео\n\n"
         "Во всех режимах добавляется тихая фоновая музыка. "
         "Отзеркаливание — на следующем шаге.",
         reply_markup=get_modes_keyboard(),
@@ -115,7 +248,7 @@ async def text_fallback_handler(message: Message, state: FSMContext):
     Сообщение вне сценария: если это ссылка — запускаем обработку.
     """
 
-    if extract_url(message.text):
+    if extract_urls(message.text):
         await video_url_handler(message, state)
         return
 
@@ -127,14 +260,50 @@ async def text_fallback_handler(message: Message, state: FSMContext):
 
 
 async def cancel_handler(message: Message, state: FSMContext):
+    user_id = message.from_user.id if message.from_user else None
+    _cancel_edit_session(user_id)
+
+    if _stop_batch(user_id):
+        await state.clear()
+        await message.answer(
+            "⏹ Пакет будет остановлен после текущего видео."
+        )
+        return
+
     await state.clear()
     await message.answer("✖️ Действие отменено.")
 
 
+def _stop_batch(user_id: int | None) -> bool:
+    stop = _batch_stops.get(user_id) if user_id is not None else None
+
+    if stop is None:
+        return False
+
+    stop.set()
+    return True
+
+
+async def batch_stop_callback(callback: CallbackQuery, state: FSMContext):
+    if _stop_batch(callback.from_user.id):
+        await callback.answer("Остановлю после текущего видео")
+    else:
+        await callback.answer("Пакет уже завершён", show_alert=True)
+
+
 async def cancel_job_callback(callback: CallbackQuery, state: FSMContext):
+    _cancel_edit_session(callback.from_user.id)
     await state.clear()
     await callback.answer("Отменено")
     await callback.message.edit_text("✖️ Обработка отменена.")
+
+
+def _cancel_edit_session(user_id: int | None) -> None:
+    session = _edit_sessions.get(user_id) if user_id is not None else None
+
+    if session is not None:
+        session.cancelled = True
+        session.done.set()
 
 
 # ==========================================
@@ -173,12 +342,19 @@ async def mirror_handler(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
     data = await state.get_data()
+    is_batch = len(data.get("source_urls") or []) > 1
+    batch_note = (
+        "\n\nВ пакетном режиме субтитры добавляются автоматически, "
+        "без ручной проверки текста."
+        if is_batch
+        else ""
+    )
 
     await callback.message.edit_text(
         f"Режим: {MODES[data['mode']]}\n"
         f"Зеркало: {'да' if mirror else 'нет'}\n\n"
-        "📝 Добавить субтитры?",
-        reply_markup=get_subtitles_keyboard(),
+        f"📝 Добавить субтитры?{batch_note}",
+        reply_markup=get_subtitles_keyboard(allow_edit=not is_batch),
     )
 
 
@@ -187,11 +363,72 @@ async def mirror_handler(callback: CallbackQuery, state: FSMContext):
 # ==========================================
 
 async def subtitles_handler(callback: CallbackQuery, state: FSMContext):
-    subtitles = callback.data.split(":", 1)[1] == "yes"
+    choice = callback.data.split(":", 1)[1]
+    subtitles = choice in ("yes", "edit")
+    data = await state.get_data()
+    # В пакете ручной правки нет, даже если прилетела старая кнопка.
+    edit_subtitles = choice == "edit" and len(data.get("source_urls") or []) <= 1
 
+    await state.update_data(
+        subtitles=subtitles,
+        edit_subtitles=edit_subtitles,
+        subtitle_style=None,
+        subtitle_style_name=None,
+    )
+
+    templates = list_templates(callback.from_user.id) if subtitles else []
+
+    if templates:
+        await state.update_data(template_ids=[template["id"] for template in templates])
+        await state.set_state(VideoStates.choosing_subtitle_style)
+        await callback.answer()
+
+        await callback.message.edit_text(
+            f"Режим: {MODES[data['mode']]}\n"
+            f"Зеркало: {'да' if data.get('mirror', True) else 'нет'}\n"
+            f"Субтитры: {_subtitles_label(subtitles, edit_subtitles)}\n\n"
+            "🎨 Выберите стиль субтитров:\n"
+            "«Стандартный» — общий стиль бота, остальные — ваши шаблоны "
+            "(настраиваются в «🎨 Мои субтитры»).",
+            reply_markup=get_subtitle_style_keyboard(templates),
+        )
+        return
+
+    await _ask_banner(callback, state)
+
+
+async def subtitle_style_handler(callback: CallbackQuery, state: FSMContext):
+    choice = callback.data.split(":", 1)[1]
+    data = await state.get_data()
+
+    style = None
+    style_name = None
+
+    if choice != "std":
+        templates = {
+            template["id"]: template
+            for template in list_templates(callback.from_user.id)
+        }
+        ids = data.get("template_ids") or []
+
+        try:
+            template = templates[ids[int(choice)]]
+        except (ValueError, IndexError, KeyError):
+            await callback.answer("Шаблон не найден — возможно, удалён", show_alert=True)
+            return
+
+        # Снимок стиля: правки шаблона во время обработки её не затронут.
+        style = normalize_style(template.get("style"))
+        style_name = template["name"]
+
+    await state.update_data(subtitle_style=style, subtitle_style_name=style_name)
+    await _ask_banner(callback, state)
+
+
+async def _ask_banner(callback: CallbackQuery, state: FSMContext) -> None:
     banner_names = [file.name for file in list_assets("banners")]
 
-    await state.update_data(subtitles=subtitles, banner_names=banner_names)
+    await state.update_data(banner_names=banner_names)
     await state.set_state(VideoStates.choosing_banner)
     await callback.answer()
 
@@ -200,14 +437,38 @@ async def subtitles_handler(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
         f"Режим: {MODES[data['mode']]}\n"
         f"Зеркало: {'да' if data.get('mirror', True) else 'нет'}\n"
-        f"Субтитры: {'да' if subtitles else 'нет'}\n\n"
+        f"Субтитры: {_subtitles_label_from(data)}\n\n"
         "📢 Выберите рекламный баннер:",
         reply_markup=get_banners_keyboard(banner_names),
     )
 
 
+def _subtitles_label(
+    subtitles: bool,
+    edit_subtitles: bool,
+    style_name: str | None = None,
+) -> str:
+    if not subtitles:
+        return "нет"
+
+    label = "да, с проверкой текста" if edit_subtitles else "да"
+
+    if style_name:
+        label += f", стиль «{style_name}»"
+
+    return label
+
+
+def _subtitles_label_from(data: dict) -> str:
+    return _subtitles_label(
+        bool(data.get("subtitles")),
+        bool(data.get("edit_subtitles")),
+        data.get("subtitle_style_name"),
+    )
+
+
 # ==========================================
-# ШАГ 5. БАННЕР → ЗАПУСК
+# ШАГ 5. БАННЕР
 # ==========================================
 
 async def banner_handler(callback: CallbackQuery, state: FSMContext):
@@ -243,6 +504,165 @@ async def banner_handler(callback: CallbackQuery, state: FSMContext):
             )
             return
 
+    await state.update_data(banner_name=banner_name)
+
+    # Шаг с концовкой показываем, только если картинка загружена.
+    if find_outro_image() is None:
+        await _start_job(callback, state, outro=False)
+        return
+
+    await state.set_state(VideoStates.choosing_outro)
+    await callback.answer()
+
+    await callback.message.edit_text(
+        f"{_choices_text(await state.get_data())}\n\n"
+        "🖼 Вставить картинку в конце видео?\n\n"
+        "Картинка закрывает весь кадр. Зеркало, субтитры и баннер "
+        "на неё не накладываются.",
+        reply_markup=get_outro_keyboard(),
+    )
+
+
+def _choices_text(data: dict) -> str:
+    return (
+        f"Режим: {MODES[data['mode']]}\n"
+        f"Зеркало: {'да' if data.get('mirror', True) else 'нет'}\n"
+        f"Субтитры: {_subtitles_label_from(data)}\n"
+        f"Баннер: {data.get('banner_name') or 'без рекламы'}"
+    )
+
+
+# ==========================================
+# ШАГ 6. КАРТИНКА В КОНЦЕ: да/нет → куда → на сколько секунд → ЗАПУСК
+# ==========================================
+
+async def outro_handler(callback: CallbackQuery, state: FSMContext):
+    if callback.data.split(":", 1)[1] != "yes":
+        await _start_job(callback, state, outro=False)
+        return
+
+    await state.set_state(VideoStates.choosing_outro_mode)
+    await callback.answer()
+
+    await callback.message.edit_text(
+        f"{_choices_text(await state.get_data())}\n\n"
+        "🖼 Как вставить картинку?\n\n"
+        f"➕ <b>В конец видео</b> — картинка показывается {OUTRO_DURATION:g} сек "
+        "после окончания видео (видео станет длиннее).\n"
+        "🔲 <b>Поверх конца видео</b> — картинка накладывается на последние "
+        "секунды видео, звук продолжает идти, длина не меняется.",
+        reply_markup=get_outro_mode_keyboard(OUTRO_DURATION),
+        parse_mode="HTML",
+    )
+
+
+async def outro_mode_handler(callback: CallbackQuery, state: FSMContext):
+    if callback.data.split(":", 1)[1] != "overlay":
+        await _start_job(callback, state, outro=True, outro_mode="append")
+        return
+
+    await state.set_state(VideoStates.choosing_outro_seconds)
+    await callback.answer()
+
+    await callback.message.edit_text(
+        f"{_choices_text(await state.get_data())}\n\n"
+        "🔲 На сколько последних секунд наложить картинку?\n\n"
+        f"Своё значение — от {OVERLAY_MIN_SECONDS:g} до {OVERLAY_MAX_SECONDS:g} сек. "
+        "Если видео короче, картинка будет на всё видео.",
+        reply_markup=get_outro_seconds_keyboard(),
+    )
+
+
+async def outro_seconds_handler(callback: CallbackQuery, state: FSMContext):
+    choice = callback.data.split(":", 1)[1]
+
+    if choice == "custom":
+        await callback.answer()
+        await callback.message.edit_text(
+            f"{_choices_text(await state.get_data())}\n\n"
+            "✏️ Отправьте число секунд, например 4 или 2.5 "
+            f"(от {OVERLAY_MIN_SECONDS:g} до {OVERLAY_MAX_SECONDS:g}).",
+            reply_markup=get_outro_seconds_keyboard(),
+        )
+        return
+
+    seconds = _parse_seconds(choice)
+
+    if seconds is None:
+        await callback.answer("Некорректное значение", show_alert=True)
+        return
+
+    await _start_job(
+        callback,
+        state,
+        outro=True,
+        outro_mode="overlay",
+        overlay_seconds=seconds,
+    )
+
+
+async def outro_seconds_message_handler(message: Message, state: FSMContext):
+    seconds = _parse_seconds(message.text)
+
+    if seconds is None:
+        await message.answer(
+            f"❌ Нужно число от {OVERLAY_MIN_SECONDS:g} до {OVERLAY_MAX_SECONDS:g}, "
+            "например 4 или 2.5.",
+            reply_markup=get_outro_seconds_keyboard(),
+        )
+        return
+
+    # Запуск идёт через кнопку: так используется общий путь с callback.
+    await message.answer(
+        f"Картинка будет поверх последних {seconds:g} сек.",
+        reply_markup=get_outro_seconds_confirm_keyboard(seconds),
+    )
+
+
+def _parse_seconds(text: str | None) -> float | None:
+    try:
+        seconds = round(float((text or "").strip().replace(",", ".")), 1)
+    except ValueError:
+        return None
+
+    if not OVERLAY_MIN_SECONDS <= seconds <= OVERLAY_MAX_SECONDS:
+        return None
+
+    return seconds
+
+
+def _outro_label(outro: bool, outro_mode: str, overlay_seconds: float) -> str:
+    if not outro:
+        return "нет"
+
+    if outro_mode == "overlay":
+        return f"поверх последних {overlay_seconds:g} сек"
+
+    return f"в конце на {OUTRO_DURATION:g} сек"
+
+
+async def _start_job(
+    callback: CallbackQuery,
+    state: FSMContext,
+    outro: bool,
+    outro_mode: str = "append",
+    overlay_seconds: float = OUTRO_DURATION,
+) -> None:
+    data = await state.get_data()
+
+    url = data.get("source_url")
+    urls = data.get("source_urls") or ([url] if url else [])
+    mode = data.get("mode")
+    banner_name = data.get("banner_name")
+
+    if not urls or mode not in MODES:
+        await state.clear()
+        await callback.answer()
+        await callback.message.edit_text(
+            "❌ Данные сессии потеряны. Отправьте ссылку заново."
+        )
+        return
+
     user_id = callback.from_user.id
 
     if user_id in _active_users:
@@ -254,6 +674,14 @@ async def banner_handler(callback: CallbackQuery, state: FSMContext):
         mirror=bool(data.get("mirror", True)),
         subtitles=bool(data.get("subtitles")),
         banner_name=banner_name,
+        outro=outro,
+        outro_mode=outro_mode,
+        outro_overlay_seconds=overlay_seconds,
+        subtitle_style=data.get("subtitle_style") if data.get("subtitles") else None,
+    )
+    is_batch = len(urls) > 1
+    edit_subtitles = (
+        options.subtitles and not is_batch and bool(data.get("edit_subtitles"))
     )
 
     await state.clear()
@@ -262,13 +690,33 @@ async def banner_handler(callback: CallbackQuery, state: FSMContext):
     summary = (
         f"Режим: {MODES[mode]}\n"
         f"Зеркало: {'да' if options.mirror else 'нет'}\n"
-        f"Субтитры: {'да' if options.subtitles else 'нет'}\n"
-        f"Баннер: {banner_name or 'без рекламы'}"
+        f"Субтитры: "
+        f"{_subtitles_label(options.subtitles, edit_subtitles, data.get('subtitle_style_name'))}\n"
+        f"Баннер: {banner_name or 'без рекламы'}\n"
+        f"Картинка в конце: {_outro_label(outro, outro_mode, overlay_seconds)}"
     )
 
-    status = await callback.message.edit_text(f"{summary}\n\n🚀 Запускаю…")
-
     _active_users.add(user_id)
+
+    if is_batch:
+        status = await callback.message.edit_text(
+            f"📋 Пакет: {len(urls)} видео\n\n{summary}\n\n🚀 Запускаю…",
+            reply_markup=get_batch_stop_keyboard(),
+        )
+
+        asyncio.create_task(
+            run_batch(
+                status_message=status if isinstance(status, Message) else callback.message,
+                chat_id=callback.message.chat.id,
+                user_id=user_id,
+                urls=urls,
+                options=options,
+                summary=summary,
+            )
+        )
+        return
+
+    status = await callback.message.edit_text(f"{summary}\n\n🚀 Запускаю…")
 
     asyncio.create_task(
         run_job(
@@ -278,8 +726,134 @@ async def banner_handler(callback: CallbackQuery, state: FSMContext):
             url=url,
             options=options,
             summary=summary,
+            state=state,
+            edit_subtitles=edit_subtitles,
         )
     )
+
+
+# ==========================================
+# РУЧНАЯ ПРАВКА СУБТИТРОВ
+# ==========================================
+
+EDIT_INSTRUCTIONS = (
+    "✏️ <b>Проверьте текст субтитров</b>\n\n"
+    "Ниже — распознанные фразы с номерами. Чтобы исправить, "
+    "отправьте сообщением строки в том же формате:\n"
+    "<code>3. исправленный текст</code>\n\n"
+    "• можно прислать только изменённые строки или весь список целиком;\n"
+    "• можно отправлять несколько сообщений подряд;\n"
+    "• чтобы удалить фразу, оставьте после номера пустоту: <code>3.</code>\n"
+    "• тайминги сохраняются, переносы строк расставятся сами.\n\n"
+    "Когда закончите — нажмите «✅ Готово»."
+)
+
+
+async def _edit_subtitles(
+    bot: Bot,
+    chat_id: int,
+    user_id: int,
+    state: FSMContext,
+    srt_file: Path,
+    work_dir: Path,
+    max_line_length: int | None = None,
+) -> Path | None:
+    """
+    Показывает текст субтитров и ждёт правок. Возвращает итоговый SRT
+    или None, если пользователь удалил все фразы.
+    """
+
+    session = SubtitleEditSession(blocks=read_srt_blocks(srt_file))
+
+    if not session.blocks:
+        return None
+
+    _edit_sessions[user_id] = session
+    await state.set_state(VideoStates.editing_subtitles)
+
+    try:
+        await bot.send_message(chat_id, EDIT_INSTRUCTIONS, parse_mode="HTML")
+
+        for part in editing_messages(session.blocks):
+            await bot.send_message(chat_id, part)
+
+        await bot.send_message(
+            chat_id,
+            "Жду правки или нажмите «✅ Готово», если всё верно.",
+            reply_markup=get_subtitles_edit_keyboard(),
+        )
+
+        try:
+            await asyncio.wait_for(
+                session.done.wait(),
+                timeout=SUBTITLE_EDIT_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            await bot.send_message(
+                chat_id,
+                "⏰ Время на правку вышло — продолжаю с текущим текстом.",
+            )
+
+    finally:
+        _edit_sessions.pop(user_id, None)
+
+        if await state.get_state() == VideoStates.editing_subtitles.state:
+            await state.clear()
+
+    if session.cancelled:
+        raise JobCancelled()
+
+    return await asyncio.to_thread(
+        write_edited_srt, session.blocks, work_dir, max_line_length
+    )
+
+
+async def subtitles_edit_message_handler(message: Message, state: FSMContext):
+    session = _edit_sessions.get(message.from_user.id)
+
+    if session is None:
+        await state.clear()
+        await message.answer("Сессия правки субтитров уже закрыта.")
+        return
+
+    result = apply_edits(session.blocks, message.text or "")
+
+    lines = []
+
+    if result.changed:
+        lines.append(f"✏️ Исправлено: {', '.join(map(str, result.changed))}")
+
+    if result.deleted:
+        lines.append(f"🗑 Удалено: {', '.join(map(str, result.deleted))}")
+
+    if result.invalid:
+        preview = "\n".join(result.invalid[:5])
+        lines.append(
+            "⚠️ Не понял строки (нужен формат «номер. текст», "
+            f"номера от 1 до {len(session.blocks)}):\n{preview}"
+        )
+
+    if not lines:
+        lines.append("Изменений нет — текст совпадает с текущим.")
+
+    lines.append("\nМожно прислать ещё правки или нажать «✅ Готово».")
+
+    await message.answer(
+        "\n".join(lines),
+        reply_markup=get_subtitles_edit_keyboard(),
+    )
+
+
+async def subtitles_edit_done_callback(callback: CallbackQuery, state: FSMContext):
+    session = _edit_sessions.get(callback.from_user.id)
+
+    if session is None:
+        await callback.answer("Правка уже завершена", show_alert=True)
+        return
+
+    session.done.set()
+    await callback.answer("Принято")
+    await callback.message.edit_text("✅ Текст субтитров принят, продолжаю обработку.")
 
 
 # ==========================================
@@ -314,6 +888,13 @@ class StatusUpdater:
         asyncio.run_coroutine_threadsafe(self.set(text), self.loop)
 
 
+def _style_line_length(options: ProcessingOptions) -> int | None:
+    if options.subtitle_style is None:
+        return None
+
+    return normalize_style(options.subtitle_style)["max_line_length"]
+
+
 async def run_job(
     status_message: Message,
     chat_id: int,
@@ -321,21 +902,67 @@ async def run_job(
     url: str,
     options: ProcessingOptions,
     summary: str,
-) -> None:
+    state: FSMContext | None = None,
+    edit_subtitles: bool = False,
+    job_suffix: str = "",
+    release_user: bool = True,
+) -> bool:
+    """
+    Обрабатывает одно видео. Возвращает True, если результат отправлен.
+    """
 
-    job_id = f"u{user_id}_{int(time.time())}"
+    job_id = f"u{user_id}_{int(time.time())}{job_suffix}"
     input_dir = settings.input_dir / job_id
     work_dir = settings.output_dir / job_id
 
     status = StatusUpdater(status_message, summary)
     started = time.monotonic()
     success = False
+    cancelled = False
     error_text = None
+    extra_notes: list[str] = []
 
     try:
         await status.set("⬇️ Скачиваю видео…")
 
         source = await asyncio.to_thread(download_video, url, input_dir)
+
+        if edit_subtitles and state is not None:
+            if is_processing():
+                await status.set(
+                    f"⏳ Видео в очереди. Задач перед вами: {queue_size() + 1}"
+                )
+
+            # Слот нужен только на распознавание: пока пользователь
+            # правит текст, очередь обрабатывает другие видео.
+            async with processing_slot():
+                await status.set("📝 Распознаю речь для субтитров…")
+                srt_file = await asyncio.to_thread(
+                    prepare_subtitles, source, work_dir, _style_line_length(options)
+                )
+
+            if srt_file is not None:
+                await status.set("✏️ Жду проверки текста субтитров (сообщения ниже)…")
+                srt_file = await _edit_subtitles(
+                    bot=status_message.bot,
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    state=state,
+                    srt_file=srt_file,
+                    work_dir=work_dir,
+                    max_line_length=_style_line_length(options),
+                )
+
+                if srt_file is None:
+                    extra_notes.append("ℹ️ Все фразы удалены — субтитры не добавлены.")
+            else:
+                extra_notes.append(NO_SPEECH_NOTE)
+
+            options = (
+                replace(options, subtitles_file=srt_file)
+                if srt_file is not None
+                else replace(options, subtitles=False)
+            )
 
         if is_processing():
             await status.set(
@@ -360,11 +987,14 @@ async def run_job(
             f"Зеркало: {'да' if result.mirrored else 'нет'}",
             f"Субтитры: {'да' if result.subtitles_added else 'нет'}",
             f"Баннер: {'да' if result.banner_added else 'нет'}",
+            f"Картинка в конце: {result.outro_label or 'нет'}",
             f"Размер: {result.size_mb:.2f} MB",
         ]
 
-        if result.notes:
-            caption_lines += ["", *result.notes]
+        notes = extra_notes + result.notes
+
+        if notes:
+            caption_lines += ["", *notes]
 
         await status_message.bot.send_video(
             chat_id=chat_id,
@@ -382,6 +1012,10 @@ async def run_job(
         error_text = str(error)
         await status.set(f"❌ {error}")
 
+    except JobCancelled:
+        cancelled = True
+        await status.set("✖️ Обработка отменена.")
+
     except Exception as error:
         error_text = f"{type(error).__name__}: {error}"
         print(f"Ошибка обработки ({job_id}): {error_text}")
@@ -398,19 +1032,118 @@ async def run_job(
         await status.set(f"❌ {user_text}\n\nПопробуйте ещё раз.")
 
     finally:
-        _active_users.discard(user_id)
+        if release_user:
+            _active_users.discard(user_id)
 
         await asyncio.to_thread(cleanup_task, input_dir, work_dir)
 
+        if not cancelled:
+            try:
+                record_processing(
+                    user_id=user_id,
+                    mode=options.mode,
+                    subtitles=options.subtitles,
+                    banner=options.banner_name is not None,
+                    success=success,
+                    seconds=time.monotonic() - started,
+                    error=error_text,
+                )
+            except Exception as error:
+                print(f"Не удалось записать статистику: {error}")
+
+    return success
+
+
+# ==========================================
+# ПАКЕТНАЯ ОБРАБОТКА
+# ==========================================
+
+async def run_batch(
+    status_message: Message,
+    chat_id: int,
+    user_id: int,
+    urls: list[str],
+    options: ProcessingOptions,
+    summary: str,
+) -> None:
+    """
+    Обрабатывает ссылки по очереди с одинаковыми настройками.
+    Ошибка одного видео не останавливает остальные.
+    """
+
+    bot = status_message.bot
+    stop = asyncio.Event()
+    _batch_stops[user_id] = stop
+
+    total = len(urls)
+    failed: list[int] = []
+    done = 0
+
+    async def set_status(text: str, keyboard=None) -> None:
         try:
-            record_processing(
-                user_id=user_id,
-                mode=options.mode,
-                subtitles=options.subtitles,
-                banner=options.banner_name is not None,
-                success=success,
-                seconds=time.monotonic() - started,
-                error=error_text,
+            await status_message.edit_text(
+                f"📋 Пакет: {total} видео\n\n{summary}\n\n{text}",
+                reply_markup=keyboard,
             )
         except Exception as error:
-            print(f"Не удалось записать статистику: {error}")
+            if "not modified" not in str(error):
+                print(f"Не удалось обновить статус пакета: {error}")
+
+    try:
+        for index, url in enumerate(urls, start=1):
+            if stop.is_set():
+                break
+
+            await set_status(
+                f"▶️ Видео {index} из {total}\n"
+                f"Готово: {done - len(failed)}, с ошибкой: {len(failed)}",
+                get_batch_stop_keyboard(),
+            )
+
+            job_header = f"🎬 Видео {index}/{total}\n{url}"
+
+            try:
+                job_message = await bot.send_message(
+                    chat_id,
+                    f"{job_header}\n\n⏳ Ожидание…",
+                    disable_web_page_preview=True,
+                )
+
+                success = await run_job(
+                    status_message=job_message,
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    url=url,
+                    options=options,
+                    summary=job_header,
+                    job_suffix=f"_{index}",
+                    release_user=False,
+                )
+            except Exception as error:
+                print(f"Ошибка пакета (видео {index}): {type(error).__name__}: {error}")
+                success = False
+
+            done += 1
+
+            if not success:
+                failed.append(index)
+
+    finally:
+        _batch_stops.pop(user_id, None)
+        _active_users.discard(user_id)
+
+    succeeded = done - len(failed)
+    lines = [f"✅ Пакет завершён: {succeeded} из {total} видео готово."]
+
+    if failed:
+        lines.append(f"❌ С ошибкой: {', '.join(map(str, failed))}")
+
+    if done < total:
+        lines.append(f"⏹ Остановлено вручную, не обработано: {total - done}")
+
+    await set_status("\n".join(lines))
+
+    try:
+        await bot.send_message(chat_id, "\n".join(lines))
+    except Exception as error:
+        print(f"Не удалось отправить итог пакета: {error}")

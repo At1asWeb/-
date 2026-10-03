@@ -42,17 +42,59 @@ def get_mirror_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def get_subtitles_keyboard() -> InlineKeyboardMarkup:
+def get_subtitles_keyboard(allow_edit: bool = True) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                text="✅ Да, автоматически",
+                callback_data="subtitles:yes",
+            ),
+        ],
+    ]
+
+    if allow_edit:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="✏️ Да, с проверкой текста",
+                    callback_data="subtitles:edit",
+                ),
+            ]
+        )
+
+    rows += [
+        [
+            InlineKeyboardButton(
+                text="❌ Без субтитров",
+                callback_data="subtitles:no",
+            ),
+        ],
+        [CANCEL_BUTTON],
+    ]
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_batch_stop_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="✅ Да, добавить",
-                    callback_data="subtitles:yes",
+                    text="⏹ Остановить после текущего видео",
+                    callback_data="batch:stop",
                 ),
+            ],
+        ]
+    )
+
+
+def get_subtitles_edit_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
                 InlineKeyboardButton(
-                    text="❌ Без субтитров",
-                    callback_data="subtitles:no",
+                    text="✅ Готово — наложить субтитры",
+                    callback_data="subedit:done",
                 ),
             ],
             [CANCEL_BUTTON],
@@ -83,3 +125,79 @@ def get_banners_keyboard(banner_names: list[str]) -> InlineKeyboardMarkup:
     rows.append([CANCEL_BUTTON])
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_outro_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🖼 Да, вставить",
+                    callback_data="outro:yes",
+                ),
+                InlineKeyboardButton(
+                    text="❌ Без картинки",
+                    callback_data="outro:no",
+                ),
+            ],
+            [CANCEL_BUTTON],
+        ]
+    )
+
+
+def get_outro_mode_keyboard(append_seconds: float) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"➕ В конец видео ({append_seconds:g} сек)",
+                    callback_data="outromode:append",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔲 Поверх конца видео",
+                    callback_data="outromode:overlay",
+                ),
+            ],
+            [CANCEL_BUTTON],
+        ]
+    )
+
+
+OVERLAY_SECONDS_PRESETS = (1, 2, 3, 4, 5, 7, 10)
+
+
+def get_outro_seconds_keyboard() -> InlineKeyboardMarkup:
+    buttons = [
+        InlineKeyboardButton(text=f"{seconds} сек", callback_data=f"outrosec:{seconds}")
+        for seconds in OVERLAY_SECONDS_PRESETS
+    ]
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            buttons[:4],
+            buttons[4:],
+            [
+                InlineKeyboardButton(
+                    text="✏️ Своё значение",
+                    callback_data="outrosec:custom",
+                ),
+            ],
+            [CANCEL_BUTTON],
+        ]
+    )
+
+
+def get_outro_seconds_confirm_keyboard(seconds: float) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"✅ Наложить на {seconds:g} сек и запустить",
+                    callback_data=f"outrosec:{seconds:g}",
+                ),
+            ],
+            [CANCEL_BUTTON],
+        ]
+    )

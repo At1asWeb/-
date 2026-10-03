@@ -30,14 +30,18 @@ def background_input_arguments() -> tuple[list[str], Path]:
     )
 
 
-def background_filter(background_index: int, output_label: str) -> str:
+def background_filter(
+    background_index: int,
+    output_label: str,
+    fps: str | int = FPS,
+) -> str:
     return (
         f"[{background_index}:v]"
         f"scale={CANVAS_WIDTH}:{CANVAS_HEIGHT}:"
         "force_original_aspect_ratio=increase,"
         f"crop={CANVAS_WIDTH}:{CANVAS_HEIGHT},"
         "setsar=1,"
-        f"fps={FPS},"
+        f"fps={fps},"
         "format=yuv420p"
         f"{output_label}"
     )

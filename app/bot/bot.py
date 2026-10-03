@@ -2,6 +2,9 @@ import asyncio
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.client.telegram import TelegramAPIServer
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.methods import AnswerCallbackQuery
 from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.storage.memory import MemoryStorage
 
@@ -9,15 +12,30 @@ from app.config import settings
 from app.cleanup.cleanup import cleanup_old_files
 
 from app.bot.handlers.start import help_handler, start_handler
+from app.bot.handlers.templates import (
+    TemplateStates,
+    template_input_handler,
+    templates_callback_handler,
+    templates_menu_handler,
+)
 
 from app.bot.handlers.video import (
     VideoStates,
     banner_handler,
+    batch_file_handler,
+    batch_stop_callback,
     cancel_handler,
     cancel_job_callback,
     mirror_handler,
     mode_handler,
+    outro_handler,
+    outro_mode_handler,
+    outro_seconds_handler,
+    outro_seconds_message_handler,
     process_video_start,
+    subtitle_style_handler,
+    subtitles_edit_done_callback,
+    subtitles_edit_message_handler,
     subtitles_handler,
     text_fallback_handler,
     video_url_handler,
@@ -55,16 +73,50 @@ def build_proxy_url() -> str | None:
     return f"socks5://{settings.proxy_host}:{settings.proxy_port}"
 
 
+async def _ignore_expired_callback_answer(make_request, bot, method):
+    """
+    Telegram принимает ответ на нажатие кнопки только ~15 секунд.
+    Если кнопку нажали, пока бот был выключен или перезапускался,
+    ответить уже нельзя — это не ошибка, и обработчик должен
+    продолжить работу (например, всё равно открыть нужный раздел).
+    """
+
+    try:
+        return await make_request(bot, method)
+    except TelegramBadRequest as error:
+        if isinstance(method, AnswerCallbackQuery) and (
+            "query is too old" in error.message
+            or "query ID is invalid" in error.message
+        ):
+            return True
+
+        raise
+
+
 def create_bot() -> Bot:
     # Большой таймаут нужен для отправки видео.
     proxy_url = build_proxy_url()
 
+    session_options: dict = {"timeout": 600}
+
     if proxy_url:
         print("SOCKS5 прокси: включён")
-        session = AiohttpSession(proxy=proxy_url, timeout=600)
+        session_options["proxy"] = proxy_url
     else:
         print("SOCKS5 прокси: выключен")
-        session = AiohttpSession(timeout=600)
+
+    if settings.telegram_api_url:
+        # Локальный Bot API сервер: отправка файлов до 2000 МБ.
+        print(f"Bot API сервер: {settings.telegram_api_url}")
+        session_options["api"] = TelegramAPIServer.from_base(
+            settings.telegram_api_url,
+            is_local=True,
+        )
+
+    print(f"Лимит отправки: {settings.telegram_upload_limit_mb} МБ")
+
+    session = AiohttpSession(**session_options)
+    session.middleware(_ignore_expired_callback_answer)
 
     return Bot(token=settings.bot_token, session=session)
 
@@ -92,6 +144,7 @@ def create_dispatcher() -> Dispatcher:
 
     dp.message.register(help_handler, F.text == "ℹ️ Помощь")
     dp.message.register(process_video_start, F.text == "🎬 Обработать видео")
+    dp.message.register(templates_menu_handler, F.text == "🎨 Мои субтитры")
     dp.message.register(admin_panel_handler, F.text == "⚙️ Админ-панель")
 
     # ------------------------------------------
@@ -104,6 +157,17 @@ def create_dispatcher() -> Dispatcher:
     )
 
     # ------------------------------------------
+    # Шаблоны субтитров пользователя
+    # ------------------------------------------
+
+    dp.message.register(
+        template_input_handler,
+        StateFilter(TemplateStates.waiting_input),
+        F.text,
+    )
+    dp.callback_query.register(templates_callback_handler, F.data.startswith("tpl:"))
+
+    # ------------------------------------------
     # Сценарий обработки видео
     # ------------------------------------------
 
@@ -112,6 +176,9 @@ def create_dispatcher() -> Dispatcher:
         StateFilter(VideoStates.waiting_for_url),
         F.text,
     )
+    # Список ссылок .txt-файлом — в любом состоянии, кроме загрузки ассетов
+    # в админке (тот хендлер зарегистрирован раньше).
+    dp.message.register(batch_file_handler, F.document)
 
     dp.callback_query.register(
         mode_handler,
@@ -129,11 +196,46 @@ def create_dispatcher() -> Dispatcher:
         F.data.startswith("subtitles:"),
     )
     dp.callback_query.register(
+        subtitle_style_handler,
+        StateFilter(VideoStates.choosing_subtitle_style),
+        F.data.startswith("substyle:"),
+    )
+    dp.callback_query.register(
         banner_handler,
         StateFilter(VideoStates.choosing_banner),
         F.data.startswith("banner:"),
     )
+    dp.callback_query.register(
+        outro_handler,
+        StateFilter(VideoStates.choosing_outro),
+        F.data.startswith("outro:"),
+    )
+    dp.callback_query.register(
+        outro_mode_handler,
+        StateFilter(VideoStates.choosing_outro_mode),
+        F.data.startswith("outromode:"),
+    )
+    dp.callback_query.register(
+        outro_seconds_handler,
+        StateFilter(VideoStates.choosing_outro_seconds),
+        F.data.startswith("outrosec:"),
+    )
+    dp.message.register(
+        outro_seconds_message_handler,
+        StateFilter(VideoStates.choosing_outro_seconds),
+        F.text,
+    )
+    dp.message.register(
+        subtitles_edit_message_handler,
+        StateFilter(VideoStates.editing_subtitles),
+        F.text,
+    )
+    dp.callback_query.register(
+        subtitles_edit_done_callback,
+        F.data == "subedit:done",
+    )
     dp.callback_query.register(cancel_job_callback, F.data == "job:cancel")
+    dp.callback_query.register(batch_stop_callback, F.data == "batch:stop")
 
     # ------------------------------------------
     # Админ-панель
@@ -189,6 +291,9 @@ async def main():
         settings.banners_dir,
         settings.music_dir,
         settings.backgrounds_dir,
+        settings.outro_dir,
+        settings.fonts_dir,
+        settings.overlays_dir,
     ):
         directory.mkdir(parents=True, exist_ok=True)
 

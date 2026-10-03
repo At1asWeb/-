@@ -27,6 +27,15 @@ work/output/*
 # Local assets
 assets/banners/*
 assets/music/*
+# Тяжёлые файлы: модель Whisper и фоновые видео
+assets/models/*
+assets/backgrounds/*
+assets/outro/*
+assets/fonts/*
+assets/overlays/*
+!assets/overlays/.gitkeep
+!assets/fonts/.gitkeep
+!assets/outro/.gitkeep
 
 # IDE
 .vscode/
@@ -38,3 +47,7 @@ Thumbs.db
 
 # Logs
 *.log
+# Runtime stats (contains user IDs)
+data/stats.json
+# Шаблоны субтитров пользователей
+data/subtitle_templates.json

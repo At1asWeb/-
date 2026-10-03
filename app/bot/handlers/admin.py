@@ -4,6 +4,8 @@
 - 📢 Баннеры / 🎵 Музыка / 🌄 Фоны — список, добавление, удаление;
 - 📊 Статистика обработок;
 - ⚙️ Настройки (музыка, громкость, геометрия и прозрачность баннера);
+- 📝 Субтитры (размер, положение, цвета) с предпросмотром;
+- 🎞 Видео сверху (высота наложения) с предпросмотром;
 - 🧹 Очистка временных файлов.
 """
 
@@ -25,9 +27,15 @@ from app.processing.library import (
 )
 from app.processing.lock import is_processing, queue_size
 from app.processing.media import get_duration, get_video_size, probe
+from app.processing.subtitle_style import read_font_family
+from app.processing.subtitles import render_subtitles_preview
+from app.processing.top_overlay import overlay_height, render_top_overlay_preview
 from app.storage import (
     BANNER_FIT_MODES,
     BANNER_HEIGHT_AUTO_BELOW,
+    SUBTITLE_COLORS,
+    SUBTITLE_SETTING_KEYS,
+    TOP_OVERLAY_KEYS,
     get_runtime,
     get_stats,
     reset_runtime,
@@ -46,6 +54,8 @@ from app.bot.keyboards.admin import (
     get_settings_keyboard,
     get_stats_keyboard,
     get_stats_reset_confirm_keyboard,
+    get_subtitle_settings_keyboard,
+    get_top_overlay_keyboard,
 )
 
 
@@ -160,6 +170,50 @@ async def admin_callback_handler(callback: CallbackQuery, state: FSMContext):
         await _send_preview(callback, int(parts[2]))
         return
 
+    if action == "subs":
+        await callback.answer()
+        await _show_subtitle_settings(callback)
+        return
+
+    if action == "top":
+        await callback.answer()
+        await _show_top_overlay(callback)
+        return
+
+    if action in ("topset", "topval"):
+        await _change_top_overlay(callback, action, parts[2])
+        return
+
+    if action == "toppv":
+        await _send_top_overlay_preview(callback)
+        return
+
+    if action == "subset":
+        await _change_subtitle_setting(callback, parts[2], parts[3])
+        return
+
+    if action == "subcolor":
+        await _cycle_subtitle_color(callback, parts[2])
+        return
+
+    if action == "subreset":
+        reset_runtime(SUBTITLE_SETTING_KEYS)
+        await callback.answer("Настройки субтитров сброшены")
+        await _show_subtitle_settings(callback)
+        return
+
+    if action == "subpv":
+        await _send_subtitles_preview(callback, None)
+        return
+
+    if action == "subpvlist":
+        await _show_subtitles_preview_list(callback)
+        return
+
+    if action == "subpvb":
+        await _send_subtitles_preview(callback, int(parts[2]))
+        return
+
     if action == "cleanup":
         await _cleanup(callback)
         return
@@ -199,7 +253,10 @@ def _asset_list_text(kind: str) -> str:
         lines += ["", f"Всего: {len(files)} ({total_mb:.1f} MB)"]
 
     if kind == "backgrounds" and not files:
-        lines += ["", "⚠️ Без фонов режимы Circle, Crop и Zoom + Crop работать не будут."]
+        lines += ["", "⚠️ Без фонов режимы Circle, Crop, Zoom + Crop и «видео сверху» работать не будут."]
+
+    if kind == "overlays" and not files:
+        lines += ["", "⚠️ Без этих видео режим «Crop + Zoom 10% + видео сверху» работать не будет."]
 
     if kind == "music" and not files:
         lines += ["", "Без музыки видео будет только с оригинальным звуком."]
@@ -226,6 +283,10 @@ async def _start_upload(callback: CallbackQuery, state: FSMContext, kind: str) -
         "banners": "Картинку можно отправить как фото. Видео/GIF — файлом.",
         "music": "Отправьте трек как аудио или файлом.",
         "backgrounds": "Лучше всего вертикальное видео 1080x1920 без звука.",
+        "overlays": "Видео будет растянуто на всю ширину кадра сверху и обрезано "
+        "по высоте наложения. Звук не используется.",
+        "fonts": "Отправьте файл шрифта (TTF/OTF). Для русского текста "
+        "шрифт должен поддерживать кириллицу.",
     }[kind]
 
     await _edit(
@@ -372,6 +433,14 @@ async def asset_upload_handler(message: Message, state: FSMContext):
 
 
 def _validate_media(kind: str, file: Path) -> str:
+    if kind == "fonts":
+        family = read_font_family(file)
+
+        if not family:
+            raise RuntimeError("Не удалось прочитать имя шрифта")
+
+        return f"🔤 Семейство: {family} (доступно в «🎨 Мои субтитры»)"
+
     if kind == "music":
         info = probe(file)
 
@@ -584,7 +653,14 @@ async def _change_setting(callback: CallbackQuery, arguments: list[str]) -> None
     action = arguments[0]
 
     if action == "reset":
-        reset_runtime()
+        # Субтитры и «видео сверху» сбрасываются в своих разделах.
+        reset_runtime(
+            tuple(
+                key
+                for key in runtime
+                if key not in SUBTITLE_SETTING_KEYS and key not in TOP_OVERLAY_KEYS
+            )
+        )
         await callback.answer("Настройки сброшены")
 
     elif action == "music_toggle":
@@ -704,6 +780,244 @@ async def _send_preview(callback: CallbackQuery, index: int) -> None:
     await callback.message.answer(
         _settings_text(runtime),
         reply_markup=get_settings_keyboard(runtime),
+    )
+
+
+# ==========================================
+# НАСТРОЙКИ СУБТИТРОВ
+# ==========================================
+
+def _subtitle_settings_text(runtime: dict) -> str:
+    return (
+        "📝 Настройки субтитров\n\n"
+        "Изменения применяются к следующим обработкам. "
+        "Значения указаны для кадра 1080x1920 и масштабируются под видео.\n\n"
+        f"🔠 Размер шрифта: {runtime['subtitle_font_size']}\n"
+        f"⬇️ Отступ снизу: {runtime['subtitle_bottom_offset_percent']}% высоты\n"
+        f"↔️ Поля по бокам: {runtime['subtitle_margin_percent']}% ширины\n"
+        f"📏 Символов в строке: до {runtime['subtitle_max_line_length']} "
+        "(не больше 2 строк на фразу)\n"
+        f"🖌 Толщина обводки: {runtime['subtitle_outline']}\n"
+        f"🎨 Цвет текста: {SUBTITLE_COLORS[runtime['subtitle_text_color']][0]}\n"
+        f"🎨 Цвет обводки: {SUBTITLE_COLORS[runtime['subtitle_outline_color']][0]}\n\n"
+        "Проверить, как выглядит, — «👁 Предпросмотр». "
+        "«С баннером» покажет, не пересекаются ли субтитры с рекламой."
+    )
+
+
+async def _show_subtitle_settings(callback: CallbackQuery) -> None:
+    runtime = get_runtime()
+    await _edit(
+        callback,
+        _subtitle_settings_text(runtime),
+        get_subtitle_settings_keyboard(runtime),
+    )
+
+
+async def _change_subtitle_setting(
+    callback: CallbackQuery,
+    key: str,
+    delta_text: str,
+) -> None:
+    runtime = get_runtime()
+
+    try:
+        if key not in SUBTITLE_SETTING_KEYS:
+            raise KeyError(key)
+
+        update_runtime(**{key: runtime[key] + int(delta_text)})
+    except (KeyError, ValueError):
+        await callback.answer("Неизвестная настройка", show_alert=True)
+        return
+
+    await callback.answer()
+    await _show_subtitle_settings(callback)
+
+
+async def _cycle_subtitle_color(callback: CallbackQuery, key: str) -> None:
+    runtime = get_runtime()
+
+    if key not in SUBTITLE_SETTING_KEYS or key not in runtime:
+        await callback.answer("Неизвестная настройка", show_alert=True)
+        return
+
+    colors = list(SUBTITLE_COLORS)
+    current = runtime[key]
+    index = colors.index(current) if current in colors else 0
+    new_color = colors[(index + 1) % len(colors)]
+
+    update_runtime(**{key: new_color})
+    await callback.answer(f"Цвет: {SUBTITLE_COLORS[new_color][0]}")
+    await _show_subtitle_settings(callback)
+
+
+async def _show_subtitles_preview_list(callback: CallbackQuery) -> None:
+    banners = list_assets("banners")
+
+    if not banners:
+        await callback.answer("Баннеров нет. Добавьте их в разделе «Баннеры».", show_alert=True)
+        return
+
+    await callback.answer()
+    await _edit(
+        callback,
+        "👁 Предпросмотр субтитров с баннером\n\n"
+        "Выберите баннер — пришлю кадр 1080x1920 с текущими настройками.",
+        get_preview_keyboard(
+            [file.name for file in banners],
+            prefix="adm:subpvb",
+            back="adm:subs",
+        ),
+    )
+
+
+async def _send_subtitles_preview(
+    callback: CallbackQuery,
+    banner_index: int | None,
+) -> None:
+    banner = None
+
+    if banner_index is not None:
+        banners = list_assets("banners")
+
+        if banner_index >= len(banners):
+            await callback.answer("Баннер не найден", show_alert=True)
+            return
+
+        banner = banners[banner_index]
+
+    await callback.answer("Готовлю предпросмотр…")
+
+    preview_file = settings.temp_dir / f"subtitles_preview_{callback.from_user.id}.png"
+
+    try:
+        await asyncio.to_thread(render_subtitles_preview, preview_file, banner)
+
+        caption = (
+            "👁 Предпросмотр субтитров\n\n"
+            "Жёлтые линии: рамка — поля по бокам, "
+            "горизонтальная линия — нижняя граница текста.\n\n"
+            "Если строка не помещается в рамку, она переносится на следующую. "
+            "Фраза длиннее 2 строк показывается частями — здесь первая."
+        )
+
+        if banner is not None:
+            caption += f"\nБаннер: {banner.name}"
+
+        await callback.message.answer_photo(FSInputFile(preview_file), caption=caption)
+
+    except Exception as error:
+        print(f"Ошибка предпросмотра субтитров: {type(error).__name__}: {error}")
+        await callback.message.answer("❌ Не удалось построить предпросмотр.")
+
+    finally:
+        preview_file.unlink(missing_ok=True)
+
+    runtime = get_runtime()
+    await callback.message.answer(
+        _subtitle_settings_text(runtime),
+        reply_markup=get_subtitle_settings_keyboard(runtime),
+    )
+
+
+# ==========================================
+# ВИДЕО СВЕРХУ
+# ==========================================
+
+def _top_overlay_text(runtime: dict) -> str:
+    percent = runtime["top_overlay_height_percent"]
+    files = list_assets("overlays")
+
+    lines = [
+        "🎞 Видео сверху",
+        "",
+        "Режим «Crop + Zoom 10% + видео сверху»: случайное видео из библиотеки "
+        "накладывается сверху кадра на всю ширину и тянется вниз на заданную "
+        "высоту. Основное видео вписывается под ним.",
+        "",
+        f"↕️ Высота наложения: {percent}% кадра ({overlay_height(percent)} из 1920 px)",
+        f"📁 Видео в библиотеке: {len(files)}",
+        "",
+        "Настройка сохраняется и применяется ко всем следующим обработкам. "
+        "Проверить — «👁 Предпросмотр».",
+    ]
+
+    if not files:
+        lines += ["", "⚠️ Добавьте хотя бы одно видео в «📁 Видео для наложения»."]
+
+    return "\n".join(lines)
+
+
+async def _show_top_overlay(callback: CallbackQuery) -> None:
+    runtime = get_runtime()
+    await _edit(
+        callback,
+        _top_overlay_text(runtime),
+        get_top_overlay_keyboard(runtime, len(list_assets("overlays"))),
+    )
+
+
+async def _change_top_overlay(callback: CallbackQuery, action: str, value_text: str) -> None:
+    runtime = get_runtime()
+    key = "top_overlay_height_percent"
+
+    try:
+        value = int(value_text)
+    except ValueError:
+        await callback.answer("Неизвестная настройка", show_alert=True)
+        return
+
+    new_value = runtime[key] + value if action == "topset" else value
+    updated = update_runtime(**{key: new_value})
+
+    if updated[key] == runtime[key]:
+        await callback.answer("Это предельное значение" if action == "topset" else "Уже выбрано")
+        return
+
+    await callback.answer(f"Высота: {updated[key]}%")
+    await _show_top_overlay(callback)
+
+
+async def _send_top_overlay_preview(callback: CallbackQuery) -> None:
+    if not list_assets("overlays"):
+        await callback.answer(
+            "Нет видео для наложения. Добавьте их в «📁 Видео для наложения».",
+            show_alert=True,
+        )
+        return
+
+    await callback.answer("Готовлю предпросмотр…")
+
+    preview_file = settings.temp_dir / f"top_overlay_preview_{callback.from_user.id}.png"
+
+    try:
+        _, overlay_file, height = await asyncio.to_thread(
+            render_top_overlay_preview, preview_file
+        )
+
+        await callback.message.answer_photo(
+            FSInputFile(preview_file),
+            caption=(
+                "👁 Предпросмотр: видео сверху\n\n"
+                f"Наложение: {overlay_file.name}\n"
+                f"Высота: {get_runtime()['top_overlay_height_percent']}% ({height} px)\n\n"
+                "Жёлтая линия — нижняя граница наложения. Ниже — место "
+                "для основного видео (здесь тестовая картинка). Субтитры "
+                "и баннер добавятся поверх, как обычно."
+            ),
+        )
+
+    except Exception as error:
+        print(f"Ошибка предпросмотра видео сверху: {type(error).__name__}: {error}")
+        await callback.message.answer("❌ Не удалось построить предпросмотр.")
+
+    finally:
+        preview_file.unlink(missing_ok=True)
+
+    runtime = get_runtime()
+    await callback.message.answer(
+        _top_overlay_text(runtime),
+        reply_markup=get_top_overlay_keyboard(runtime, len(list_assets("overlays"))),
     )
 
 
